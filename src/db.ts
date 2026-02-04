@@ -174,14 +174,14 @@ export class SynapseDb {
 
 const SCHEMA_SQL = `
 create table if not exists agents (
-  agent_id uuid primary key,
+  agent_id text primary key,
   agent_name text not null,
   public_key text not null,
   created_at timestamptz not null default now()
 );
 
 create table if not exists ledger (
-  agent_id uuid primary key references agents(agent_id) on delete cascade,
+  agent_id text primary key references agents(agent_id) on delete cascade,
   credits integer not null,
   locked integer not null,
   updated_at timestamptz not null default now()
@@ -192,10 +192,10 @@ create table if not exists jobs (
   title text not null,
   description text null,
   budget integer not null,
-  requester_id uuid not null references agents(agent_id) on delete cascade,
+  requester_id text not null references agents(agent_id) on delete cascade,
   created_at_ms bigint not null,
   status text not null,
-  worker_id uuid null references agents(agent_id) on delete set null,
+  worker_id text null references agents(agent_id) on delete set null,
   kind text not null default 'simple',
   payload jsonb not null default '{}'::jsonb
 );
@@ -206,7 +206,7 @@ create index if not exists jobs_status_idx on jobs(status);
 create table if not exists bids (
   bid_id uuid primary key,
   job_id uuid not null references jobs(job_id) on delete cascade,
-  bidder_id uuid not null references agents(agent_id) on delete cascade,
+  bidder_id text not null references agents(agent_id) on delete cascade,
   price integer not null,
   eta_seconds integer not null,
   created_at_ms bigint not null

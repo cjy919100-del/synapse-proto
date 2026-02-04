@@ -6,6 +6,7 @@ import type { RawData } from 'ws';
 
 import { SynapseDb } from './db.js';
 import { randomNonceB64, verifyAuth } from './crypto.js';
+import { deriveAgentId } from './identity.js';
 import {
   PROTOCOL_VERSION,
   type AgentToServerMsg,
@@ -161,27 +162,30 @@ export class CoreServer extends EventEmitter {
     });
     if (!ok) return this.fail(session.ws, 'signature_verification_failed');
 
-    const agentId = crypto.randomUUID();
+    const agentId = deriveAgentId(msg.publicKey);
     session.authed = true;
     session.agentId = agentId;
     session.agentName = msg.agentName;
     session.publicKeyDerB64 = msg.publicKey;
 
-    this.ledger.set(agentId, { credits: DEFAULT_STARTING_CREDITS, locked: 0 });
+    if (!this.ledger.has(agentId)) {
+      this.ledger.set(agentId, { credits: DEFAULT_STARTING_CREDITS, locked: 0 });
+    }
+    const current = this.ledger.get(agentId)!;
     const authed: AuthedMsg = {
       v: PROTOCOL_VERSION,
       type: 'authed',
       agentId,
-      credits: DEFAULT_STARTING_CREDITS,
+      credits: current.credits,
     };
 
     // DB mode: persist identity and wallet before acknowledging auth (so observer snapshot can be DB-backed).
     if (this.db) {
       try {
         await this.db.upsertAgent({ agentId, agentName: msg.agentName, publicKeyDerB64: msg.publicKey });
-        await this.db.upsertLedger({ agentId, credits: DEFAULT_STARTING_CREDITS, locked: 0 });
+        await this.db.upsertLedger({ agentId, credits: current.credits, locked: current.locked });
       } catch (err) {
-        this.ledger.delete(agentId);
+        // Keep any existing in-memory account; auth fails but we don't want to corrupt state.
         session.authed = false;
         session.agentId = undefined;
         session.agentName = undefined;
@@ -198,7 +202,7 @@ export class CoreServer extends EventEmitter {
       type: 'agent_authed',
       agentId,
       agentName: msg.agentName,
-      credits: DEFAULT_STARTING_CREDITS,
+      credits: current.credits,
     };
     this.emit('tape', evt);
     if (this.db) void this.db.insertEvent({ kind: 'agent_authed', payload: evt });
@@ -356,6 +360,7 @@ export class CoreServer extends EventEmitter {
           reason: evaluation.reason,
         };
         this.broadcast(failedMsg);
+        this.sendLedgerUpdate(job.requesterId);
 
         if (this.db) {
           await this.db.updateJob(job);
