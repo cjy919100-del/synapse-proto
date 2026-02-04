@@ -35,12 +35,21 @@ create table if not exists job_evidence (
   id bigserial primary key,
   job_id uuid not null references jobs(job_id) on delete cascade,
   kind text not null,
+  detail text not null default '',
   payload jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now()
 );
 
 create index if not exists job_evidence_job_id_idx on job_evidence(job_id);
 create index if not exists job_evidence_created_at_idx on job_evidence(created_at desc);
+
+do $$
+begin
+  alter table job_evidence add column if not exists detail text not null default '';
+exception
+  when undefined_table then null;
+  when others then null;
+end $$;
 
 create table if not exists jobs (
   job_id uuid primary key,

@@ -66,10 +66,11 @@ export class SynapseDb {
     );
   }
 
-  async insertJobEvidence(args: { jobId: string; kind: string; payload: unknown }): Promise<void> {
-    await this.pool.query(`insert into job_evidence (job_id, kind, payload) values ($1, $2, $3)`, [
+  async insertJobEvidence(args: { jobId: string; kind: string; detail: string; payload: unknown }): Promise<void> {
+    await this.pool.query(`insert into job_evidence (job_id, kind, detail, payload) values ($1, $2, $3, $4)`, [
       args.jobId,
       args.kind,
+      args.detail,
       args.payload,
     ]);
   }
@@ -242,6 +243,14 @@ export class SynapseDb {
       order by created_at_ms desc
       `,
     );
+    const evidenceRes = await this.pool.query(
+      `
+      select id, job_id, kind, detail, payload, extract(epoch from created_at) as created_at_s
+      from job_evidence
+      order by created_at desc
+      limit 500
+      `,
+    );
 
     return {
       agents: agentsRes.rows.map((r) => ({
@@ -274,6 +283,13 @@ export class SynapseDb {
         price: Number(r.price),
         etaSeconds: Number(r.eta_seconds),
         createdAtMs: Number(r.created_at_ms),
+      })),
+      evidence: evidenceRes.rows.map((r) => ({
+        id: String(r.id),
+        atMs: Math.floor(Number(r.created_at_s) * 1000),
+        jobId: String(r.job_id),
+        kind: String(r.kind),
+        detail: String(r.detail ?? ''),
       })),
     };
   }
@@ -315,12 +331,21 @@ create table if not exists job_evidence (
   id bigserial primary key,
   job_id uuid not null references jobs(job_id) on delete cascade,
   kind text not null,
+  detail text not null default '',
   payload jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now()
 );
 
 create index if not exists job_evidence_job_id_idx on job_evidence(job_id);
 create index if not exists job_evidence_created_at_idx on job_evidence(created_at desc);
+
+do $$
+begin
+  alter table job_evidence add column if not exists detail text not null default '';
+exception
+  when undefined_table then null;
+  when others then null;
+end $$;
 
 create table if not exists jobs (
   job_id uuid primary key,

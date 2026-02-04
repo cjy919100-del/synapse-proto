@@ -68,6 +68,14 @@ type TapeEvent =
   | { type: 'evidence'; jobId: string; kind: string; detail: string }
   | { type: 'broadcast'; msg: ServerToAgentMsg };
 
+export type EvidenceItem = {
+  id: string;
+  atMs: number;
+  jobId: string;
+  kind: string;
+  detail: string;
+};
+
 export type ObserverSnapshot = {
   agents: Array<{
     agentId: string;
@@ -78,6 +86,7 @@ export type ObserverSnapshot = {
   }>;
   jobs: Job[];
   bids: Bid[];
+  evidence: EvidenceItem[];
 };
 
 export class CoreServer extends EventEmitter {
@@ -87,6 +96,7 @@ export class CoreServer extends EventEmitter {
   private readonly agentMeta = new Map<string, { agentName: string; publicKeyDerB64?: string | null }>();
   private readonly reputation = new Map<string, Reputation>();
   private readonly jobs = new Map<string, JobState>();
+  private readonly evidence: EvidenceItem[] = [];
   private readonly db?: SynapseDb;
   private readonly githubIssueToJobId = new Map<string, string>(); // in-memory fallback when DB is disabled
   private readonly githubPrToJobId = new Map<string, string>(); // owner/repo#pr -> jobId
@@ -280,11 +290,26 @@ export class CoreServer extends EventEmitter {
   }
 
   private async addEvidence(args: { jobId: string; kind: string; detail: string; payload?: unknown }) {
+    const item: EvidenceItem = {
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      atMs: Date.now(),
+      jobId: args.jobId,
+      kind: args.kind,
+      detail: args.detail,
+    };
+    this.evidence.unshift(item);
+    if (this.evidence.length > 500) this.evidence.length = 500;
+
     const evt: TapeEvent = { type: 'evidence', jobId: args.jobId, kind: args.kind, detail: args.detail };
     this.emit('tape', evt);
     if (this.db) {
       try {
-        await this.db.insertJobEvidence({ jobId: args.jobId, kind: args.kind, payload: args.payload ?? {} });
+        await this.db.insertJobEvidence({
+          jobId: args.jobId,
+          kind: args.kind,
+          detail: args.detail,
+          payload: args.payload ?? {},
+        });
         void this.db.insertEvent({ kind: 'evidence', payload: evt });
       } catch (err) {
         this.log(`[server] db_error_evidence: ${(err as Error).message}`);
@@ -920,7 +945,7 @@ export class CoreServer extends EventEmitter {
       bids.push(...job.bids);
     }
 
-    return { agents, jobs, bids };
+    return { agents, jobs, bids, evidence: this.evidence.slice(0, 500) };
   }
 }
 

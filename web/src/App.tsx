@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useReducer, useRef } from 'react';
+import React, { useEffect, useMemo, useReducer, useRef, useState } from 'react';
 
 import { Badge } from './components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
@@ -23,6 +23,8 @@ type Job = {
   createdAtMs: number;
   status: JobStatus;
   workerId?: string;
+  kind?: string;
+  payload?: Record<string, unknown>;
 };
 type Bid = {
   id: string;
@@ -33,7 +35,9 @@ type Bid = {
   createdAtMs: number;
 };
 
-type Snapshot = { agents: Agent[]; jobs: Job[]; bids: Bid[] };
+type EvidenceItem = { id: string; atMs: number; jobId: string; kind: string; detail: string };
+
+type Snapshot = { agents: Agent[]; jobs: Job[]; bids: Bid[]; evidence: EvidenceItem[] };
 
 type TapeEvent =
   | { type: 'agent_authed'; agentId: string; agentName: string; credits: number }
@@ -59,6 +63,7 @@ type State = {
   agents: Record<string, Agent>;
   jobs: Record<string, Job>;
   bids: Record<string, Bid>;
+  evidence: EvidenceItem[];
   tape: TapeRow[];
   totalEvents: number;
 };
@@ -121,7 +126,7 @@ function reduce(state: State, action: Action): State {
       const bids: Record<string, Bid> = {};
       for (const b of action.snapshot.bids) bids[b.id] = b;
 
-      return { ...state, agents, jobs, bids };
+      return { ...state, agents, jobs, bids, evidence: action.snapshot.evidence ?? [] };
     }
     case 'event': {
       const next: State = {
@@ -129,6 +134,7 @@ function reduce(state: State, action: Action): State {
         agents: { ...state.agents },
         jobs: { ...state.jobs },
         bids: { ...state.bids },
+        evidence: [...state.evidence],
         totalEvents: state.totalEvents + 1,
       };
 
@@ -167,6 +173,15 @@ function reduce(state: State, action: Action): State {
           locked: prev?.locked ?? 0,
           rep: { completed: action.event.completed, failed: action.event.failed, score: action.event.score },
         };
+      } else if (action.event.type === 'evidence') {
+        const item: EvidenceItem = {
+          id: nowId(),
+          atMs: Date.now(),
+          jobId: action.event.jobId,
+          kind: action.event.kind,
+          detail: action.event.detail,
+        };
+        next.evidence = [item, ...next.evidence].slice(0, 500);
       } else if (action.event.type === 'broadcast') {
         const msg = action.event.msg;
         if (isObject(msg) && typeof msg.type === 'string') {
@@ -307,9 +322,12 @@ export default function App() {
     agents: {},
     jobs: {},
     bids: {},
+    evidence: [],
     tape: [],
     totalEvents: 0,
   } satisfies State);
+
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<number | null>(null);
@@ -370,6 +388,14 @@ export default function App() {
   }, [state.bids]);
 
   const openJobs = jobsSorted.filter((j) => j.status === 'open').length;
+  const selectedJob = selectedJobId ? state.jobs[selectedJobId] : null;
+  const selectedEvidence = useMemo(() => {
+    if (!selectedJobId) return [];
+    return state.evidence
+      .filter((e) => e.jobId === selectedJobId)
+      .sort((a, b) => b.atMs - a.atMs)
+      .slice(0, 80);
+  }, [selectedJobId, state.evidence]);
 
   return (
     <div className="min-h-screen">
@@ -470,7 +496,11 @@ export default function App() {
                     </TableRow>
                   ) : (
                     jobsSorted.slice(0, 18).map((job) => (
-                      <TableRow key={job.id}>
+                      <TableRow
+                        key={job.id}
+                        className={cn('cursor-pointer', selectedJobId === job.id && 'bg-card/60')}
+                        onClick={() => setSelectedJobId(job.id)}
+                      >
                         <TableCell>{statusPill(job.status)}</TableCell>
                         <TableCell className="max-w-[220px]">
                           <div className="truncate text-foreground/90">{job.title}</div>
@@ -538,6 +568,77 @@ export default function App() {
           </Card>
         </div>
       </main>
+
+      {selectedJob ? (
+        <div
+          className="fixed inset-0 z-50 bg-background/70 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setSelectedJobId(null)}
+        >
+          <div className="mx-auto max-w-3xl px-4 pt-10" onClick={(e) => e.stopPropagation()}>
+            <Card>
+              <CardHeader>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <CardTitle className="truncate">{selectedJob.title}</CardTitle>
+                    <CardDescription className="font-mono text-[11px]">
+                      id {shortId(selectedJob.id)} · kind {String(selectedJob.kind ?? 'simple')}
+                    </CardDescription>
+                  </div>
+                  <button
+                    className="text-xs font-mono text-muted-foreground hover:text-foreground border rounded-md px-2 py-1"
+                    onClick={() => setSelectedJobId(null)}
+                  >
+                    close
+                  </button>
+                </div>
+              </CardHeader>
+              <Separator />
+              <CardContent className="pt-4 space-y-3">
+                <div className="grid grid-cols-2 gap-3 text-xs font-mono">
+                  <div className="rounded-lg border bg-background/30 p-3">
+                    <div className="text-muted-foreground">requester</div>
+                    <div className="mt-1">{shortId(selectedJob.requesterId)}</div>
+                  </div>
+                  <div className="rounded-lg border bg-background/30 p-3">
+                    <div className="text-muted-foreground">worker</div>
+                    <div className="mt-1">{selectedJob.workerId ? shortId(selectedJob.workerId) : '-'}</div>
+                  </div>
+                  <div className="rounded-lg border bg-background/30 p-3">
+                    <div className="text-muted-foreground">budget</div>
+                    <div className="mt-1 text-accent font-semibold">{selectedJob.budget}</div>
+                  </div>
+                  <div className="rounded-lg border bg-background/30 p-3">
+                    <div className="text-muted-foreground">status</div>
+                    <div className="mt-1">{selectedJob.status}</div>
+                  </div>
+                </div>
+
+                <div>
+                  <div className="text-xs font-semibold">Evidence</div>
+                  <div className="mt-2 rounded-lg border bg-background/30 p-3 max-h-[320px] overflow-auto">
+                    {selectedEvidence.length === 0 ? (
+                      <div className="text-xs font-mono text-muted-foreground">No evidence yet.</div>
+                    ) : (
+                      <div className="space-y-2">
+                        {selectedEvidence.map((ev) => (
+                          <div key={ev.id} className="text-xs font-mono">
+                            <span className="text-muted-foreground">{new Date(ev.atMs).toLocaleString()} </span>
+                            <span className="text-accent">{ev.kind}</span>
+                            <span className="text-muted-foreground"> · </span>
+                            <span className="text-foreground/90">{ev.detail}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        </div>
+      ) : null}
 
       <footer className="relative z-0 mx-auto max-w-7xl px-4 pb-6 text-[11px] font-mono text-muted-foreground flex items-center justify-between">
         <div>Phase 2 · Spectator Mode</div>

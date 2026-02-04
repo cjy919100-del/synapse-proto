@@ -32,6 +32,7 @@ describe('GitHub PR-bounty bridge', () => {
       expect(job.kind).toBe('github_pr_bounty');
       expect(job.budget).toBe(333);
       expect(job.status).toBe('open');
+      expect(snap.evidence.some((e) => e.jobId === jobId && e.kind === 'github_issue')).toBe(true);
 
       const prPayload = {
         action: 'opened',
@@ -51,6 +52,7 @@ describe('GitHub PR-bounty bridge', () => {
       const afterAward = snap.jobs.find((j) => j.id === jobId)!;
       expect(afterAward.status).toBe('awarded');
       expect(afterAward.workerId).toBe('gh:alice');
+      expect(snap.evidence.some((e) => e.jobId === jobId && e.kind === 'github_pr')).toBe(true);
 
       const requester = snap.agents.find((a) => a.agentId === 'ghrepo:cjy5507/demo')!;
       const worker = snap.agents.find((a) => a.agentId === 'gh:alice')!;
@@ -72,6 +74,7 @@ describe('GitHub PR-bounty bridge', () => {
       snap = await core.getObserverSnapshot();
       const afterDone = snap.jobs.find((j) => j.id === jobId)!;
       expect(afterDone.status).toBe('completed');
+      expect(snap.evidence.some((e) => e.jobId === jobId && e.kind === 'github_checks')).toBe(true);
 
       const requester2 = snap.agents.find((a) => a.agentId === 'ghrepo:cjy5507/demo')!;
       const worker2 = snap.agents.find((a) => a.agentId === 'gh:alice')!;

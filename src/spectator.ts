@@ -53,7 +53,11 @@ export class SpectatorServer {
         ws.send(JSON.stringify(msg));
       })
       .catch(() => {
-        const msg: SpectatorMsg = { v: PROTOCOL_VERSION, type: 'snapshot', data: { agents: [], jobs: [], bids: [] } };
+        const msg: SpectatorMsg = {
+          v: PROTOCOL_VERSION,
+          type: 'snapshot',
+          data: { agents: [], jobs: [], bids: [], evidence: [] },
+        };
         ws.send(JSON.stringify(msg));
       });
   }
