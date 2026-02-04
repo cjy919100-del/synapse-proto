@@ -40,6 +40,11 @@ type LedgerAccount = {
   locked: number;
 };
 
+type Reputation = {
+  completed: number;
+  failed: number;
+};
+
 type JobState = Job & {
   bids: Bid[];
   lockedBudget: number;
@@ -50,10 +55,17 @@ const DEFAULT_STARTING_CREDITS = 1_000;
 type TapeEvent =
   | { type: 'agent_authed'; agentId: string; agentName: string; credits: number }
   | { type: 'ledger_update'; agentId: string; credits: number; locked: number }
+  | { type: 'rep_update'; agentId: string; completed: number; failed: number; score: number }
   | { type: 'broadcast'; msg: ServerToAgentMsg };
 
 export type ObserverSnapshot = {
-  agents: Array<{ agentId: string; agentName: string; credits: number; locked: number }>;
+  agents: Array<{
+    agentId: string;
+    agentName: string;
+    credits: number;
+    locked: number;
+    rep: { completed: number; failed: number; score: number };
+  }>;
   jobs: Job[];
   bids: Bid[];
 };
@@ -63,6 +75,7 @@ export class CoreServer extends EventEmitter {
   private readonly sessions = new Map<WebSocket, Session>();
   private readonly ledger = new Map<string, LedgerAccount>();
   private readonly agentMeta = new Map<string, { agentName: string; publicKeyDerB64?: string | null }>();
+  private readonly reputation = new Map<string, Reputation>();
   private readonly jobs = new Map<string, JobState>();
   private readonly db?: SynapseDb;
   private readonly githubIssueToJobId = new Map<string, string>(); // in-memory fallback when DB is disabled
@@ -175,6 +188,9 @@ export class CoreServer extends EventEmitter {
     if (!this.ledger.has(agentId)) {
       this.ledger.set(agentId, { credits: DEFAULT_STARTING_CREDITS, locked: 0 });
     }
+    if (!this.reputation.has(agentId)) {
+      this.reputation.set(agentId, { completed: 0, failed: 0 });
+    }
     const current = this.ledger.get(agentId)!;
     const authed: AuthedMsg = {
       v: PROTOCOL_VERSION,
@@ -188,6 +204,7 @@ export class CoreServer extends EventEmitter {
       try {
         await this.db.upsertAgent({ agentId, agentName: msg.agentName, publicKeyDerB64: msg.publicKey });
         await this.db.upsertLedger({ agentId, credits: current.credits, locked: current.locked });
+        await this.db.upsertReputation({ agentId, completed: 0, failed: 0 });
       } catch (err) {
         // Keep any existing in-memory account; auth fails but we don't want to corrupt state.
         session.authed = false;
@@ -212,6 +229,34 @@ export class CoreServer extends EventEmitter {
     if (this.db) void this.db.insertEvent({ kind: 'agent_authed', payload: evt });
   }
 
+  private repScore(rep: Reputation): number {
+    // Laplace smoothing: new agents start at 0.5, not NaN.
+    return (rep.completed + 1) / (rep.completed + rep.failed + 2);
+  }
+
+  private bumpReputation(agentId: string, outcome: 'completed' | 'failed') {
+    const rep = this.reputation.get(agentId) ?? { completed: 0, failed: 0 };
+    if (outcome === 'completed') rep.completed += 1;
+    else rep.failed += 1;
+    this.reputation.set(agentId, rep);
+
+    const evt: TapeEvent = {
+      type: 'rep_update',
+      agentId,
+      completed: rep.completed,
+      failed: rep.failed,
+      score: this.repScore(rep),
+    };
+    this.emit('tape', evt);
+
+    if (this.db) {
+      void this.db
+        .upsertReputation({ agentId, completed: rep.completed, failed: rep.failed })
+        .then(() => this.db!.insertEvent({ kind: 'rep_update', payload: evt }))
+        .catch((err) => this.log(`[server] db_error_rep_update: ${(err as Error).message}`));
+    }
+  }
+
   async systemEnsureAccount(args: {
     agentId: string;
     agentName: string;
@@ -223,6 +268,7 @@ export class CoreServer extends EventEmitter {
       const credits = Math.floor(args.startingCredits ?? 0);
       this.ledger.set(args.agentId, { credits, locked: 0 });
       this.agentMeta.set(args.agentId, { agentName: args.agentName, publicKeyDerB64: args.publicKeyDerB64 ?? null });
+      this.reputation.set(args.agentId, { completed: 0, failed: 0 });
 
       // Reuse agent_authed tape shape so the dashboard learns the display name.
       const evt: TapeEvent = { type: 'agent_authed', agentId: args.agentId, agentName: args.agentName, credits };
@@ -241,6 +287,8 @@ export class CoreServer extends EventEmitter {
       });
       const acct = this.ledger.get(args.agentId)!;
       await this.db.upsertLedger({ agentId: args.agentId, credits: acct.credits, locked: acct.locked });
+      const rep = this.reputation.get(args.agentId) ?? { completed: 0, failed: 0 };
+      await this.db.upsertReputation({ agentId: args.agentId, completed: rep.completed, failed: rep.failed });
     }
   }
 
@@ -371,6 +419,7 @@ export class CoreServer extends EventEmitter {
     requesterAcct.locked -= job.lockedBudget;
     requesterAcct.credits -= job.lockedBudget;
     workerAcct.credits += job.lockedBudget;
+    this.bumpReputation(args.workerId, 'completed');
 
     const completed: JobCompletedMsg = {
       v: PROTOCOL_VERSION,
@@ -395,6 +444,41 @@ export class CoreServer extends EventEmitter {
     }
 
     void args.result;
+  }
+
+  async systemFailJob(args: { jobId: string; workerId: string; reason: string }): Promise<void> {
+    const job = this.jobs.get(args.jobId);
+    if (!job) throw new Error('job_not_found');
+    if (job.status !== 'awarded') throw new Error('job_not_awarded');
+    if (job.workerId !== args.workerId) throw new Error('not_assigned_worker');
+
+    job.status = 'failed';
+    this.bumpReputation(args.workerId, 'failed');
+
+    const requesterAcct = this.ledger.get(job.requesterId);
+    if (requesterAcct) requesterAcct.locked -= job.lockedBudget;
+
+    const failedMsg: JobFailedMsg = {
+      v: PROTOCOL_VERSION,
+      type: 'job_failed',
+      jobId: job.id,
+      workerId: args.workerId,
+      reason: args.reason,
+    };
+    this.broadcast(failedMsg);
+    this.sendLedgerUpdate(job.requesterId);
+
+    if (this.db) {
+      await this.db.updateJob(job);
+      if (requesterAcct) {
+        await this.db.upsertLedger({
+          agentId: job.requesterId,
+          credits: requesterAcct.credits,
+          locked: requesterAcct.locked,
+        });
+      }
+      void this.db.insertEvent({ kind: 'job_failed', payload: failedMsg });
+    }
   }
 
   async systemLinkGithubIssue(args: { owner: string; repo: string; issueNumber: number; jobId: string }) {
@@ -550,6 +634,7 @@ export class CoreServer extends EventEmitter {
       const evaluation = evaluateSubmission(job.payload || {}, msg.result);
       if (!evaluation.success) {
         job.status = 'failed';
+        this.bumpReputation(workerId, 'failed');
         this.emit('tape', {
           type: 'broadcast',
           msg: {
@@ -608,6 +693,7 @@ export class CoreServer extends EventEmitter {
     requesterAcct.locked -= job.lockedBudget;
     requesterAcct.credits -= job.lockedBudget;
     workerAcct.credits += job.lockedBudget;
+    this.bumpReputation(workerId, 'completed');
 
     const completed: JobCompletedMsg = {
       v: PROTOCOL_VERSION,
@@ -704,11 +790,13 @@ export class CoreServer extends EventEmitter {
     const agents: ObserverSnapshot['agents'] = [];
     for (const [agentId, acct] of this.ledger.entries()) {
       const meta = this.agentMeta.get(agentId);
+      const rep = this.reputation.get(agentId) ?? { completed: 0, failed: 0 };
       agents.push({
         agentId,
         agentName: meta?.agentName ?? agentId.slice(0, 8),
         credits: acct.credits,
         locked: acct.locked,
+        rep: { completed: rep.completed, failed: rep.failed, score: this.repScore(rep) },
       });
     }
 

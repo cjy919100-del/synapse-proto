@@ -52,6 +52,20 @@ export class SynapseDb {
     );
   }
 
+  async upsertReputation(args: { agentId: string; completed: number; failed: number }): Promise<void> {
+    await this.pool.query(
+      `
+      insert into reputation (agent_id, completed, failed)
+      values ($1, $2, $3)
+      on conflict (agent_id) do update set
+        completed = excluded.completed,
+        failed = excluded.failed,
+        updated_at = now()
+      `,
+      [args.agentId, Math.floor(args.completed), Math.floor(args.failed)],
+    );
+  }
+
   async insertJob(job: Job): Promise<void> {
     await this.pool.query(
       `
@@ -194,9 +208,15 @@ export class SynapseDb {
   async getObserverSnapshot(): Promise<ObserverSnapshot> {
     const agentsRes = await this.pool.query(
       `
-      select a.agent_id, a.agent_name, coalesce(l.credits, 0) as credits, coalesce(l.locked, 0) as locked
+      select a.agent_id,
+             a.agent_name,
+             coalesce(l.credits, 0) as credits,
+             coalesce(l.locked, 0) as locked,
+             coalesce(r.completed, 0) as completed,
+             coalesce(r.failed, 0) as failed
       from agents a
       left join ledger l on l.agent_id = a.agent_id
+      left join reputation r on r.agent_id = a.agent_id
       order by l.credits desc nulls last, a.created_at desc
       `,
     );
@@ -221,6 +241,11 @@ export class SynapseDb {
         agentName: String(r.agent_name),
         credits: Number(r.credits),
         locked: Number(r.locked),
+        rep: {
+          completed: Number(r.completed),
+          failed: Number(r.failed),
+          score: (Number(r.completed) + 1) / (Number(r.completed) + Number(r.failed) + 2),
+        },
       })),
       jobs: jobsRes.rows.map((r) => ({
         id: String(r.job_id),
@@ -268,6 +293,13 @@ create table if not exists ledger (
   agent_id text primary key references agents(agent_id) on delete cascade,
   credits integer not null,
   locked integer not null,
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists reputation (
+  agent_id text primary key references agents(agent_id) on delete cascade,
+  completed integer not null default 0,
+  failed integer not null default 0,
   updated_at timestamptz not null default now()
 );
 

@@ -6,7 +6,13 @@ import { Separator } from './components/ui/separator';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './components/ui/table';
 import { cn } from './lib/utils';
 
-type Agent = { agentId: string; agentName: string; credits: number; locked: number };
+type Agent = {
+  agentId: string;
+  agentName: string;
+  credits: number;
+  locked: number;
+  rep: { completed: number; failed: number; score: number };
+};
 type JobStatus = 'open' | 'awarded' | 'completed' | 'cancelled';
 type Job = {
   id: string;
@@ -32,6 +38,7 @@ type Snapshot = { agents: Agent[]; jobs: Job[]; bids: Bid[] };
 type TapeEvent =
   | { type: 'agent_authed'; agentId: string; agentName: string; credits: number }
   | { type: 'ledger_update'; agentId: string; credits: number; locked: number }
+  | { type: 'rep_update'; agentId: string; completed: number; failed: number; score: number }
   | { type: 'broadcast'; msg: unknown };
 
 type SpectatorMsg = { v: number; type: 'snapshot'; data: Snapshot } | { v: number; type: 'event'; data: TapeEvent };
@@ -41,7 +48,7 @@ type ConnectionStatus = 'connecting' | 'open' | 'closed';
 type TapeRow = {
   id: string;
   atMs: number;
-  kind: 'JOB' | 'BID' | 'AWARD' | 'DONE' | 'LEDGER' | 'AGENT' | 'OTHER';
+  kind: 'JOB' | 'BID' | 'AWARD' | 'DONE' | 'LEDGER' | 'AGENT' | 'REP' | 'OTHER';
   detail: string;
 };
 
@@ -90,6 +97,8 @@ function badgeForKind(kind: TapeRow['kind']) {
       return { label: 'LEDGER', variant: 'destructive' as const };
     case 'AGENT':
       return { label: 'AGENT', variant: 'outline' as const };
+    case 'REP':
+      return { label: 'REP', variant: 'accent' as const };
     default:
       return { label: 'EVT', variant: 'outline' as const };
   }
@@ -135,6 +144,7 @@ function reduce(state: State, action: Action): State {
           agentName: action.event.agentName,
           credits: action.event.credits,
           locked: prev?.locked ?? 0,
+          rep: prev?.rep ?? { completed: 0, failed: 0, score: 0.5 },
         };
       } else if (action.event.type === 'ledger_update') {
         const prev = next.agents[action.event.agentId];
@@ -143,6 +153,16 @@ function reduce(state: State, action: Action): State {
           agentName: prev?.agentName ?? shortId(action.event.agentId),
           credits: action.event.credits,
           locked: action.event.locked,
+          rep: prev?.rep ?? { completed: 0, failed: 0, score: 0.5 },
+        };
+      } else if (action.event.type === 'rep_update') {
+        const prev = next.agents[action.event.agentId];
+        next.agents[action.event.agentId] = {
+          agentId: action.event.agentId,
+          agentName: prev?.agentName ?? shortId(action.event.agentId),
+          credits: prev?.credits ?? 0,
+          locked: prev?.locked ?? 0,
+          rep: { completed: action.event.completed, failed: action.event.failed, score: action.event.score },
         };
       } else if (action.event.type === 'broadcast') {
         const msg = action.event.msg;
@@ -183,6 +203,15 @@ function eventToTapeRow(evt: TapeEvent): TapeRow | null {
       atMs,
       kind: 'AGENT',
       detail: `${evt.agentName} authed • credits=${evt.credits} • id=${shortId(evt.agentId)}`,
+    };
+  }
+  if (evt.type === 'rep_update') {
+    const pct = Math.round(evt.score * 100);
+    return {
+      id: nowId(),
+      atMs,
+      kind: 'REP',
+      detail: `rep ${shortId(evt.agentId)} -> ${pct}% (${evt.completed} ok / ${evt.failed} fail)`,
     };
   }
   if (evt.type === 'ledger_update') {
@@ -472,7 +501,11 @@ export default function App() {
                           <div className="font-mono text-xs font-semibold text-primary">{a.credits}</div>
                         </div>
                         <div className="text-[10px] font-mono text-muted-foreground">
-                          id {shortId(a.agentId)} · locked {a.locked}
+                          id {shortId(a.agentId)} · locked {a.locked} · rep {Math.round((a.rep?.score ?? 0.5) * 100)}%
+                          <span className="text-muted-foreground/70">
+                            {' '}
+                            ({a.rep?.completed ?? 0} ok / {a.rep?.failed ?? 0} fail)
+                          </span>
                         </div>
                         <div className="mt-2 h-1.5 w-full rounded-full bg-muted/60 overflow-hidden">
                           <div

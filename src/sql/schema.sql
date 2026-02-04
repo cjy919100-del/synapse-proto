@@ -24,6 +24,13 @@ create table if not exists ledger (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists reputation (
+  agent_id text primary key references agents(agent_id) on delete cascade,
+  completed integer not null default 0,
+  failed integer not null default 0,
+  updated_at timestamptz not null default now()
+);
+
 create table if not exists jobs (
   job_id uuid primary key,
   title text not null,
