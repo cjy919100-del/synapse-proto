@@ -48,3 +48,8 @@
 - [ ] Evidence log per job (issue/PR/checks/settlement) persisted in Postgres (`job_evidence`)
 - [ ] Worker stake locked on award; slashing on failed attempts; unlocked on success
 - [ ] Standardize issue template + DoD so agents can reliably act (self-demo repo)
+
+## Phase 7 (Next): Market Stabilizers (Timeouts + Rep-weighted Matching)
+
+- [ ] Timeouts: awarded jobs auto-fail + reopen on deadline to keep the market moving
+- [ ] Rep-weighted stake and/or matching heuristics to reduce spam and reward proven workers

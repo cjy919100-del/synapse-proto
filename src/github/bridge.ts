@@ -10,7 +10,7 @@ type GithubWebhook = {
 
 const DEFAULT_BOUNTY_BUDGET = 200;
 const DEFAULT_REPO_STARTING_CREDITS = 50_000;
-const DEFAULT_GH_USER_STARTING_CREDITS = 250;
+const DEFAULT_GH_USER_STARTING_CREDITS = 1_000;
 
 function repoKey(owner: string, repo: string): string {
   return `${owner}/${repo}`;
