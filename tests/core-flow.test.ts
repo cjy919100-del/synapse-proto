@@ -130,15 +130,23 @@ test('market loop: post_job -> bid -> award -> submit -> settle', async () => {
   await waitFor(worker.ws, (m) => m.type === 'job_awarded' && String((m as any).jobId) === jobId);
 
   // Start waits before submitting so we don't miss fast broadcasts.
-  const pCompleted = waitFor(
+  const pSubmitted = waitFor(
     requester.ws,
-    (m) => m.type === 'job_completed' && String((m as any).jobId) === jobId,
+    (m) => m.type === 'job_submitted' && String((m as any).jobId) === jobId,
   );
   const pRequesterLedger = waitFor(requester.ws, (m) => m.type === 'ledger_update');
   const pWorkerLedger = waitFor(worker.ws, (m) => m.type === 'ledger_update');
 
   // worker submits
   worker.ws.send(JSON.stringify({ v: PROTOCOL_VERSION, type: 'submit', jobId, result: 'done' }));
+
+  await pSubmitted;
+  requester.ws.send(JSON.stringify({ v: PROTOCOL_VERSION, type: 'review', jobId, decision: 'accept' }));
+
+  const pCompleted = waitFor(
+    requester.ws,
+    (m) => m.type === 'job_completed' && String((m as any).jobId) === jobId,
+  );
 
   const [completed, requesterLedger, workerLedger] = await Promise.all([
     pCompleted,

@@ -47,7 +47,7 @@ export const JobSchema = z.object({
   budget: z.number().positive(),
   requesterId: z.string(),
   createdAtMs: z.number(),
-  status: z.enum(['open', 'awarded', 'completed', 'cancelled', 'failed']),
+  status: z.enum(['open', 'awarded', 'in_review', 'completed', 'cancelled', 'failed']),
   workerId: z.string().optional(),
   kind: z.string().default('simple'),
   payload: z.record(z.unknown()).default({}),
@@ -61,6 +61,13 @@ export const BidSchema = z.object({
   price: z.number().positive(),
   etaSeconds: z.number().positive(),
   createdAtMs: z.number(),
+  bidderRep: z
+    .object({
+      completed: z.number().nonnegative(),
+      failed: z.number().nonnegative(),
+      score: z.number().min(0).max(1),
+    })
+    .optional(),
 });
 export type Bid = z.infer<typeof BidSchema>;
 
@@ -123,6 +130,34 @@ export const SubmitMsgSchema = z.object({
 });
 export type SubmitMsg = z.infer<typeof SubmitMsgSchema>;
 
+export const ReviewMsgSchema = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  type: z.literal('review'),
+  jobId: z.string(),
+  decision: z.enum(['accept', 'reject', 'changes']),
+  notes: z.string().optional(),
+});
+export type ReviewMsg = z.infer<typeof ReviewMsgSchema>;
+
+export const JobSubmittedMsgSchema = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  type: z.literal('job_submitted'),
+  jobId: z.string(),
+  workerId: z.string(),
+  bytes: z.number().nonnegative(),
+  preview: z.string().optional(),
+});
+export type JobSubmittedMsg = z.infer<typeof JobSubmittedMsgSchema>;
+
+export const JobReviewedMsgSchema = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  type: z.literal('job_reviewed'),
+  jobId: z.string(),
+  decision: z.enum(['accept', 'reject', 'changes']),
+  notes: z.string().optional(),
+});
+export type JobReviewedMsg = z.infer<typeof JobReviewedMsgSchema>;
+
 export const JobCompletedMsgSchema = z.object({
   v: z.literal(PROTOCOL_VERSION),
   type: z.literal('job_completed'),
@@ -136,6 +171,7 @@ export const LedgerUpdateMsgSchema = z.object({
   v: z.literal(PROTOCOL_VERSION),
   type: z.literal('ledger_update'),
   credits: z.number(),
+  locked: z.number().optional(),
 });
 export type LedgerUpdateMsg = z.infer<typeof LedgerUpdateMsgSchema>;
 
@@ -156,6 +192,8 @@ export const ServerToAgentMsgSchema = z.discriminatedUnion('type', [
   JobPostedMsgSchema,
   BidPostedMsgSchema,
   JobAwardedMsgSchema,
+  JobSubmittedMsgSchema,
+  JobReviewedMsgSchema,
   JobCompletedMsgSchema,
   JobFailedMsgSchema,
   LedgerUpdateMsgSchema,
@@ -168,6 +206,7 @@ export const AgentToServerMsgSchema = z.discriminatedUnion('type', [
   BidMsgSchema,
   AwardMsgSchema,
   SubmitMsgSchema,
+  ReviewMsgSchema,
 ]);
 export type AgentToServerMsg = z.infer<typeof AgentToServerMsgSchema>;
 

@@ -13,6 +13,10 @@ This repo is a prototype of an AI-to-AI labor market:
 3) Open dashboard:
    - `http://localhost:8790`
 
+Autonomous economy demo (agents as both boss + worker):
+- `npm run economy:dev`
+- Open `http://localhost:8790` and click `Run demo` or just watch contracts appear/bid/award/review/settle.
+
 ## With Postgres persistence
 1) Start DB:
    - `npm run db:up`

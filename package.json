@@ -7,6 +7,7 @@
     "agent": "tsx src/agent.ts",
     "sim": "tsx src/sim.ts",
     "dev": "npm run dash:build && tsx src/dev.ts",
+    "economy:dev": "npm run dash:build && tsx src/economy.ts",
     "dash:dev": "vite --config vite.config.ts",
     "dash:build": "vite build --config vite.config.ts",
     "dash:preview": "vite preview --config vite.config.ts",

@@ -113,7 +113,9 @@ test(dbUrl ? 'DB-backed snapshot contains simulated market state' : 'DB-backed s
   await waitFor(worker.ws, (m) => m.type === 'job_awarded');
 
   worker.ws.send(JSON.stringify({ v: PROTOCOL_VERSION, type: 'submit', jobId, result: 'done' }));
-  await waitFor(requester.ws, (m) => m.type === 'job_completed');
+  await waitFor(requester.ws, (m) => m.type === 'job_submitted' && String((m as any).jobId) === jobId);
+  requester.ws.send(JSON.stringify({ v: PROTOCOL_VERSION, type: 'review', jobId, decision: 'accept' }));
+  await waitFor(requester.ws, (m) => m.type === 'job_completed' && String((m as any).jobId) === jobId);
 
   // DB snapshot should now include both agents + at least this job + bid.
   const snap = await db.getObserverSnapshot();
@@ -124,4 +126,3 @@ test(dbUrl ? 'DB-backed snapshot contains simulated market state' : 'DB-backed s
   requester.ws.close();
   worker.ws.close();
 });
-

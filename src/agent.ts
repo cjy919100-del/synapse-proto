@@ -8,6 +8,7 @@ import {
   type ChallengeMsg,
   type JobAwardedMsg,
   type JobPostedMsg,
+  type JobSubmittedMsg,
   ServerToAgentMsgSchema,
 } from './protocol.js';
 import { AgentLlm } from './llm.js';
@@ -25,9 +26,11 @@ export class FakeAgent {
   private readonly ws: WebSocket;
   private agentId: string | null = null;
   private credits = 0;
+  private locked = 0;
   private readonly keyPair = generateEd25519KeyPair();
   // Jobs we posted but haven't awarded yet. (We learn the jobId via `job_posted` broadcast.)
-  private readonly pendingJobs = new Set<string>();
+  private readonly ownedJobs = new Set<string>();
+  private readonly unawardedOwnedJobs = new Set<string>();
   // Solutions we prepared for coding tasks (jobId -> code)
   private readonly preparedSolutions = new Map<string, Promise<string>>();
   private readonly codingPayloadByJobId = new Map<
@@ -69,6 +72,7 @@ export class FakeAgent {
         return;
       case 'ledger_update':
         this.credits = msg.credits;
+        this.locked = msg.locked ?? this.locked;
         this.log(`[agent:${this.config.name}] credits=${msg.credits}`);
         return;
       case 'job_posted':
@@ -77,6 +81,8 @@ export class FakeAgent {
         return this.onBidPosted(msg);
       case 'job_awarded':
         return this.onJobAwarded(msg);
+      case 'job_submitted':
+        return this.onJobSubmitted(msg);
       case 'error':
         this.log(`[agent:${this.config.name}] error=${msg.message}`);
         return;
@@ -108,7 +114,10 @@ export class FakeAgent {
     if (msg.job.status !== 'open') return;
 
     if (this.config.role === 'requester') {
-      if (msg.job.requesterId === this.agentId) this.pendingJobs.add(msg.job.id);
+      if (msg.job.requesterId === this.agentId) {
+        this.ownedJobs.add(msg.job.id);
+        this.unawardedOwnedJobs.add(msg.job.id);
+      }
       return;
     }
 
@@ -150,8 +159,8 @@ export class FakeAgent {
     if (this.config.role !== 'requester') return;
 
     // If this requester created the job, auto-award the first bid we see.
-    if (!this.pendingJobs.has(msg.bid.jobId)) return;
-    this.pendingJobs.delete(msg.bid.jobId);
+    if (!this.unawardedOwnedJobs.has(msg.bid.jobId)) return;
+    this.unawardedOwnedJobs.delete(msg.bid.jobId);
 
     const award: AgentToServerMsg = {
       v: PROTOCOL_VERSION,
@@ -207,6 +216,22 @@ export class FakeAgent {
 
       submitWith(result);
     }, 1_000);
+  }
+
+  private onJobSubmitted(msg: JobSubmittedMsg) {
+    if (!this.agentId) return;
+    if (this.config.role !== 'requester') return;
+    if (!this.ownedJobs.has(msg.jobId)) return;
+
+    // Auto-accept for dev. AutonomousRequesterAgent will implement policy-based review.
+    const review: AgentToServerMsg = {
+      v: PROTOCOL_VERSION,
+      type: 'review',
+      jobId: msg.jobId,
+      decision: 'accept',
+      notes: 'auto_accept(dev)',
+    };
+    this.send(review);
   }
 
   private startRequesterLoop() {

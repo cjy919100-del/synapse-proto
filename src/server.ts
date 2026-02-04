@@ -23,6 +23,8 @@ import {
   type ServerToAgentMsg,
   safeParseAgentMessage,
   type JobFailedMsg,
+  type JobSubmittedMsg,
+  type JobReviewedMsg,
 } from './protocol.js';
 import { evaluateSubmission } from './evaluator.js';
 
@@ -178,6 +180,8 @@ export class CoreServer extends EventEmitter {
         return await this.handleAward(session, msg);
       case 'submit':
         return await this.handleSubmit(session, msg);
+      case 'review':
+        return await this.handleReview(session, msg);
       // Validated by Zod, but switch might be missing cases in future
       default:
         return this.fail(ws, 'unknown_type');
@@ -518,7 +522,7 @@ export class CoreServer extends EventEmitter {
   async systemCompleteJob(args: { jobId: string; workerId: string; result?: string }): Promise<void> {
     const job = this.jobs.get(args.jobId);
     if (!job) throw new Error('job_not_found');
-    if (job.status !== 'awarded') throw new Error('job_not_awarded');
+    if (job.status !== 'awarded' && job.status !== 'in_review') throw new Error('job_not_awarded');
     if (job.workerId !== args.workerId) throw new Error('not_assigned_worker');
 
     this.disarmTimeout(job.id);
@@ -574,7 +578,7 @@ export class CoreServer extends EventEmitter {
   async systemFailJob(args: { jobId: string; workerId: string; reason: string }): Promise<void> {
     const job = this.jobs.get(args.jobId);
     if (!job) throw new Error('job_not_found');
-    if (job.status !== 'awarded') throw new Error('job_not_awarded');
+    if (job.status !== 'awarded' && job.status !== 'in_review') throw new Error('job_not_awarded');
     if (job.workerId !== args.workerId) throw new Error('not_assigned_worker');
 
     this.disarmTimeout(job.id);
@@ -751,6 +755,10 @@ export class CoreServer extends EventEmitter {
       price: Math.floor(msg.price),
       etaSeconds: Math.floor(msg.etaSeconds),
       createdAtMs: Date.now(),
+      bidderRep: (() => {
+        const rep = this.reputation.get(bidderId) ?? { completed: 0, failed: 0 };
+        return { completed: rep.completed, failed: rep.failed, score: this.repScore(rep) };
+      })(),
     };
     job.bids.push(bid);
 
@@ -833,141 +841,96 @@ export class CoreServer extends EventEmitter {
 
     this.disarmTimeout(job.id);
 
-    // Prototype: accept all submissions. Replace with evaluators later.
-    // Evaluate submission if it's a coding task
-    if (job.kind === 'coding') {
-      // payload types are generic in protocol, cast or safely parse
-      const evaluation = evaluateSubmission(job.payload || {}, msg.result);
-      if (!evaluation.success) {
-        job.status = 'failed';
-        this.bumpReputation(workerId, 'failed');
-        this.emit('tape', {
-          type: 'broadcast',
-          msg: {
-            v: PROTOCOL_VERSION,
-            type: 'job_failed',
-            jobId: job.id,
-            workerId,
-            reason: evaluation.reason,
-          },
-        });
-        // We do NOT pay the worker. Locked budget returns to requester?
-        // For simplicity in this iteration:
-        // 1. Fail the job (status='failed')
-        // 2. Unlock requester funds (refund)
-        // 3. Notify failure
+    // Move into review. Settlement happens only after requester reviews.
+    job.status = 'in_review';
+    job.payload = { ...(job.payload ?? {}), lastSubmission: { atMs: Date.now(), by: workerId, result: msg.result } };
 
-        const requesterAcct = this.ledger.get(job.requesterId);
-        if (requesterAcct) {
-          requesterAcct.locked -= job.lockedBudget;
-          // Credits act as if budget was returned to available (since it was locked within the full balance).
-          // Actually, locked means "reserved but still in credits". So reducing locked is enough to free it up.
-        }
-
-        const workerAcct = this.ledger.get(workerId);
-        const stake = job.lockedStake;
-        let slash = 0;
-        if (workerAcct && stake > 0) {
-          slash = this.slashForStake(stake);
-          workerAcct.locked -= stake;
-          workerAcct.credits -= slash;
-          if (requesterAcct) requesterAcct.credits += slash;
-          this.sendLedgerUpdate(workerId);
-          if (requesterAcct) this.sendLedgerUpdate(job.requesterId);
-        }
-
-        await this.addEvidence({
-          jobId: job.id,
-          kind: 'settlement',
-          detail: `failed reason=${evaluation.reason} stake_unlocked=${stake} slash=${slash}`,
-          payload: { reason: evaluation.reason, stakeUnlocked: stake, slash },
-        });
-
-        const failedMsg: JobFailedMsg = {
-          v: PROTOCOL_VERSION,
-          type: 'job_failed',
-          jobId: job.id,
-          workerId,
-          reason: evaluation.reason,
-        };
-        this.broadcast(failedMsg);
-        this.sendLedgerUpdate(job.requesterId);
-
-        if (this.db) {
-          await this.db.updateJob(job);
-          if (requesterAcct) {
-            await this.db.upsertLedger({
-              agentId: job.requesterId,
-              credits: requesterAcct.credits,
-              locked: requesterAcct.locked,
-            });
-          }
-          await this.db.insertEvent({ kind: 'job_failed', payload: failedMsg });
-        }
-        return;
-      }
-    }
-
-    // Pass (or simple task)
-    job.status = 'completed';
-
-    const requesterAcct = this.ledger.get(job.requesterId);
-    const workerAcct = this.ledger.get(workerId);
-    if (!requesterAcct || !workerAcct) return this.fail(session.ws, 'ledger_missing');
-
-    requesterAcct.locked -= job.lockedBudget;
-    requesterAcct.credits -= job.lockedBudget;
-    workerAcct.credits += job.lockedBudget;
-    this.bumpReputation(workerId, 'completed');
-
-    const stake = job.lockedStake;
-    if (stake > 0) {
-      workerAcct.locked -= stake;
-      this.sendLedgerUpdate(workerId);
-    }
-
-    await this.addEvidence({
-      jobId: job.id,
-      kind: 'settlement',
-      detail: `success paid=${job.lockedBudget} stake_unlocked=${stake}`,
-      payload: { paid: job.lockedBudget, stakeUnlocked: stake },
-    });
-
-    const completed: JobCompletedMsg = {
+    const submittedMsg: JobSubmittedMsg = {
       v: PROTOCOL_VERSION,
-      type: 'job_completed',
+      type: 'job_submitted',
       jobId: job.id,
       workerId,
-      paid: job.lockedBudget,
+      bytes: msg.result.length,
+      preview: msg.result.slice(0, 120),
     };
-    this.broadcast(completed);
-
-    this.sendLedgerUpdate(job.requesterId);
-    this.sendLedgerUpdate(workerId);
+    this.broadcast(submittedMsg);
+    await this.addEvidence({
+      jobId: job.id,
+      kind: 'submit',
+      detail: `worker=${workerId.slice(0, 12)} bytes=${msg.result.length}`,
+      payload: { workerId, bytes: msg.result.length },
+    });
 
     if (this.db) {
       try {
         await this.db.updateJob(job);
-        await this.db.upsertLedger({
-          agentId: job.requesterId,
-          credits: requesterAcct.credits,
-          locked: requesterAcct.locked,
-        });
-        await this.db.upsertLedger({ agentId: workerId, credits: workerAcct.credits, locked: workerAcct.locked });
-        void this.db.insertEvent({ kind: 'job_completed', payload: completed });
+        void this.db.insertEvent({ kind: 'job_submitted', payload: submittedMsg });
       } catch (err) {
-        this.log(`[server] db_error_job_completed: ${(err as Error).message}`);
+        this.log(`[server] db_error_job_submitted: ${(err as Error).message}`);
       }
     }
 
-    // Keep result for future; currently unused.
+    // Automatic verifier can attach evidence, but does NOT settle.
+    if (job.kind === 'coding') {
+      // payload types are generic in protocol, cast or safely parse
+      const evaluation = evaluateSubmission(job.payload || {}, msg.result);
+      const autoVerify = evaluation.success ? { ok: true } : { ok: false, reason: evaluation.reason };
+      job.payload = { ...(job.payload ?? {}), autoVerify };
+      await this.addEvidence({
+        jobId: job.id,
+        kind: 'auto_verify',
+        detail: evaluation.success ? 'ok' : `fail reason=${evaluation.reason}`,
+        payload: autoVerify,
+      });
+      if (this.db) await this.db.updateJob(job);
+    }
     void msg.result;
   }
 
+  private async handleReview(session: Session, msg: AgentToServerMsg & { type: 'review' }) {
+    const reviewerId = session.agentId!;
+    const job = this.jobs.get(msg.jobId);
+    if (!job) return this.fail(session.ws, 'job_not_found');
+    if (job.requesterId !== reviewerId) return this.fail(session.ws, 'not_job_owner');
+    if (job.status !== 'in_review') return this.fail(session.ws, 'job_not_in_review');
+    if (!job.workerId) return this.fail(session.ws, 'job_missing_worker');
+
+    const reviewedMsg: JobReviewedMsg = {
+      v: PROTOCOL_VERSION,
+      type: 'job_reviewed',
+      jobId: job.id,
+      decision: msg.decision,
+      notes: msg.notes,
+    };
+    this.broadcast(reviewedMsg);
+    await this.addEvidence({
+      jobId: job.id,
+      kind: 'review',
+      detail: `decision=${msg.decision}${msg.notes ? ` notes=${msg.notes}` : ''}`,
+      payload: { decision: msg.decision, notes: msg.notes ?? null },
+    });
+
+    if (msg.decision === 'accept') {
+      await this.systemCompleteJob({ jobId: job.id, workerId: job.workerId });
+      return;
+    }
+
+    if (msg.decision === 'reject') {
+      await this.systemFailJob({ jobId: job.id, workerId: job.workerId, reason: msg.notes ?? 'rejected' });
+      await this.systemReopenJob({ jobId: job.id });
+      return;
+    }
+
+    // changes requested: keep the contract awarded so the worker can resubmit.
+    job.status = 'awarded';
+    await this.addEvidence({ jobId: job.id, kind: 'changes', detail: msg.notes ?? 'changes requested' });
+    this.armTimeout(job.id);
+    if (this.db) await this.db.updateJob(job);
+  }
   private sendLedgerUpdate(agentId: string) {
     const acct = this.ledger.get(agentId);
     if (!acct) return;
-    const msg: LedgerUpdateMsg = { v: PROTOCOL_VERSION, type: 'ledger_update', credits: acct.credits };
+    const msg: LedgerUpdateMsg = { v: PROTOCOL_VERSION, type: 'ledger_update', credits: acct.credits, locked: acct.locked };
     for (const session of this.sessions.values()) {
       if (session.authed && session.agentId === agentId) this.send(session.ws, msg);
     }

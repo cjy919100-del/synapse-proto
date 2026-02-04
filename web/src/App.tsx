@@ -13,7 +13,7 @@ type Agent = {
   locked: number;
   rep: { completed: number; failed: number; score: number };
 };
-type JobStatus = 'open' | 'awarded' | 'completed' | 'cancelled';
+type JobStatus = 'open' | 'awarded' | 'in_review' | 'completed' | 'cancelled' | 'failed';
 type Job = {
   id: string;
   title: string;
@@ -195,9 +195,22 @@ function reduce(state: State, action: Action): State {
             const prev = next.jobs[msg.jobId];
             if (prev) next.jobs[msg.jobId] = { ...prev, status: 'awarded', workerId: String(msg.workerId ?? '') };
           }
+          if (msg.type === 'job_submitted' && typeof msg.jobId === 'string') {
+            const prev = next.jobs[msg.jobId];
+            if (prev) next.jobs[msg.jobId] = { ...prev, status: 'in_review' };
+          }
+          if (msg.type === 'job_reviewed' && typeof msg.jobId === 'string') {
+            // For changes, the job becomes awarded again. For accept/reject, a later message will settle it.
+            const prev = next.jobs[msg.jobId];
+            if (prev && (msg as any).decision === 'changes') next.jobs[msg.jobId] = { ...prev, status: 'awarded' };
+          }
           if (msg.type === 'job_completed' && typeof msg.jobId === 'string') {
             const prev = next.jobs[msg.jobId];
             if (prev) next.jobs[msg.jobId] = { ...prev, status: 'completed' };
+          }
+          if (msg.type === 'job_failed' && typeof (msg as any).jobId === 'string') {
+            const prev = next.jobs[(msg as any).jobId];
+            if (prev) next.jobs[(msg as any).jobId] = { ...prev, status: 'failed' };
           }
         }
       }
@@ -280,6 +293,22 @@ function eventToTapeRow(evt: TapeEvent): TapeRow | null {
         detail: `Awarded: job=${shortId(String(msg.jobId ?? ''))} -> worker ${shortId(String(msg.workerId ?? ''))} (escrow=${msg.budgetLocked ?? '?'})`,
       };
     }
+    if (t === 'job_submitted') {
+      return {
+        id: nowId(),
+        atMs,
+        kind: 'OTHER',
+        detail: `Submitted: job=${shortId(String((msg as any).jobId ?? ''))} bytes=${String((msg as any).bytes ?? '?')} -> awaiting boss review`,
+      };
+    }
+    if (t === 'job_reviewed') {
+      return {
+        id: nowId(),
+        atMs,
+        kind: 'OTHER',
+        detail: `Boss decision: job=${shortId(String((msg as any).jobId ?? ''))} decision=${String((msg as any).decision ?? '?')}`,
+      };
+    }
     if (t === 'job_completed') {
       return {
         id: nowId(),
@@ -315,8 +344,12 @@ function statusPill(status: JobStatus) {
       return <Badge variant="default">open</Badge>;
     case 'awarded':
       return <Badge variant="secondary">awarded</Badge>;
+    case 'in_review':
+      return <Badge variant="outline">in review</Badge>;
     case 'completed':
       return <Badge variant="accent">completed</Badge>;
+    case 'failed':
+      return <Badge variant="destructive">failed</Badge>;
     default:
       return <Badge variant="outline">{status}</Badge>;
   }
