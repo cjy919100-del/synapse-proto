@@ -62,8 +62,11 @@ export class CoreServer extends EventEmitter {
   private readonly wss: WebSocketServer;
   private readonly sessions = new Map<WebSocket, Session>();
   private readonly ledger = new Map<string, LedgerAccount>();
+  private readonly agentMeta = new Map<string, { agentName: string; publicKeyDerB64?: string | null }>();
   private readonly jobs = new Map<string, JobState>();
   private readonly db?: SynapseDb;
+  private readonly githubIssueToJobId = new Map<string, string>(); // in-memory fallback when DB is disabled
+  private readonly githubPrToJobId = new Map<string, string>(); // owner/repo#pr -> jobId
 
   constructor(readonly port: number, opts?: { db?: SynapseDb }) {
     super();
@@ -167,6 +170,7 @@ export class CoreServer extends EventEmitter {
     session.agentId = agentId;
     session.agentName = msg.agentName;
     session.publicKeyDerB64 = msg.publicKey;
+    this.agentMeta.set(agentId, { agentName: msg.agentName, publicKeyDerB64: msg.publicKey });
 
     if (!this.ledger.has(agentId)) {
       this.ledger.set(agentId, { credits: DEFAULT_STARTING_CREDITS, locked: 0 });
@@ -206,6 +210,223 @@ export class CoreServer extends EventEmitter {
     };
     this.emit('tape', evt);
     if (this.db) void this.db.insertEvent({ kind: 'agent_authed', payload: evt });
+  }
+
+  async systemEnsureAccount(args: {
+    agentId: string;
+    agentName: string;
+    publicKeyDerB64?: string | null;
+    startingCredits?: number;
+  }): Promise<void> {
+    const existing = this.ledger.get(args.agentId);
+    if (!existing) {
+      const credits = Math.floor(args.startingCredits ?? 0);
+      this.ledger.set(args.agentId, { credits, locked: 0 });
+      this.agentMeta.set(args.agentId, { agentName: args.agentName, publicKeyDerB64: args.publicKeyDerB64 ?? null });
+
+      // Reuse agent_authed tape shape so the dashboard learns the display name.
+      const evt: TapeEvent = { type: 'agent_authed', agentId: args.agentId, agentName: args.agentName, credits };
+      this.emit('tape', evt);
+      if (this.db) void this.db.insertEvent({ kind: 'agent_authed', payload: evt });
+    } else {
+      // Keep any pre-existing credits/locked, but refresh display name.
+      this.agentMeta.set(args.agentId, { agentName: args.agentName, publicKeyDerB64: args.publicKeyDerB64 ?? null });
+    }
+
+    if (this.db) {
+      await this.db.upsertAgent({
+        agentId: args.agentId,
+        agentName: args.agentName,
+        publicKeyDerB64: args.publicKeyDerB64 ?? null,
+      });
+      const acct = this.ledger.get(args.agentId)!;
+      await this.db.upsertLedger({ agentId: args.agentId, credits: acct.credits, locked: acct.locked });
+    }
+  }
+
+  async systemCreateJob(args: {
+    requesterId: string;
+    title: string;
+    description?: string;
+    budget: number;
+    kind: string;
+    payload?: Record<string, unknown>;
+  }): Promise<string> {
+    const acct = this.ledger.get(args.requesterId);
+    if (!acct) throw new Error('no_ledger_account');
+    if (acct.credits - acct.locked < args.budget) throw new Error('insufficient_credits');
+
+    const jobId = crypto.randomUUID();
+    const job: JobState = {
+      id: jobId,
+      title: args.title,
+      description: args.description,
+      budget: Math.floor(args.budget),
+      requesterId: args.requesterId,
+      createdAtMs: Date.now(),
+      status: 'open',
+      bids: [],
+      lockedBudget: 0,
+      kind: args.kind,
+      payload: args.payload ?? {},
+    };
+    this.jobs.set(jobId, job);
+
+    const out: JobPostedMsg = { v: PROTOCOL_VERSION, type: 'job_posted', job };
+    this.broadcast(out);
+    if (this.db) {
+      await this.db.insertJob(job);
+      void this.db.insertEvent({ kind: 'job_posted', payload: out });
+    }
+
+    return jobId;
+  }
+
+  async systemAwardJob(args: { jobId: string; workerId: string }): Promise<void> {
+    const job = this.jobs.get(args.jobId);
+    if (!job) throw new Error('job_not_found');
+    if (job.status !== 'open') throw new Error('job_not_open');
+
+    const acct = this.ledger.get(job.requesterId);
+    if (!acct) throw new Error('no_ledger_account');
+    if (acct.credits - acct.locked < job.budget) throw new Error('insufficient_credits');
+
+    acct.locked += job.budget;
+    job.lockedBudget = job.budget;
+    job.status = 'awarded';
+    job.workerId = args.workerId;
+
+    const out: JobAwardedMsg = {
+      v: PROTOCOL_VERSION,
+      type: 'job_awarded',
+      jobId: job.id,
+      workerId: args.workerId,
+      budgetLocked: job.budget,
+    };
+    this.broadcast(out);
+
+    if (this.db) {
+      await this.db.updateJob(job);
+      await this.db.upsertLedger({ agentId: job.requesterId, credits: acct.credits, locked: acct.locked });
+      void this.db.insertEvent({ kind: 'job_awarded', payload: out });
+    }
+  }
+
+  async systemReopenJob(args: { jobId: string }): Promise<void> {
+    const job = this.jobs.get(args.jobId);
+    if (!job) throw new Error('job_not_found');
+    if (job.status !== 'awarded') return;
+
+    const requesterAcct = this.ledger.get(job.requesterId);
+    if (requesterAcct) requesterAcct.locked -= job.lockedBudget;
+
+    job.status = 'open';
+    job.workerId = undefined;
+    job.lockedBudget = 0;
+
+    // Push an update by broadcasting job_posted with same job id (simple for spectator).
+    const out: JobPostedMsg = {
+      v: PROTOCOL_VERSION,
+      type: 'job_posted',
+      job: {
+        id: job.id,
+        title: job.title,
+        description: job.description,
+        budget: job.budget,
+        requesterId: job.requesterId,
+        createdAtMs: job.createdAtMs,
+        status: job.status,
+        kind: job.kind,
+        payload: job.payload,
+      },
+    };
+    this.broadcast(out);
+    this.sendLedgerUpdate(job.requesterId);
+
+    if (this.db) {
+      await this.db.updateJob(job);
+      if (requesterAcct) {
+        await this.db.upsertLedger({
+          agentId: job.requesterId,
+          credits: requesterAcct.credits,
+          locked: requesterAcct.locked,
+        });
+      }
+      void this.db.insertEvent({ kind: 'job_reopened', payload: { jobId: job.id } });
+    }
+  }
+
+  async systemCompleteJob(args: { jobId: string; workerId: string; result?: string }): Promise<void> {
+    const job = this.jobs.get(args.jobId);
+    if (!job) throw new Error('job_not_found');
+    if (job.status !== 'awarded') throw new Error('job_not_awarded');
+    if (job.workerId !== args.workerId) throw new Error('not_assigned_worker');
+
+    job.status = 'completed';
+
+    const requesterAcct = this.ledger.get(job.requesterId);
+    const workerAcct = this.ledger.get(args.workerId);
+    if (!requesterAcct || !workerAcct) throw new Error('ledger_missing');
+
+    requesterAcct.locked -= job.lockedBudget;
+    requesterAcct.credits -= job.lockedBudget;
+    workerAcct.credits += job.lockedBudget;
+
+    const completed: JobCompletedMsg = {
+      v: PROTOCOL_VERSION,
+      type: 'job_completed',
+      jobId: job.id,
+      workerId: args.workerId,
+      paid: job.lockedBudget,
+    };
+    this.broadcast(completed);
+    this.sendLedgerUpdate(job.requesterId);
+    this.sendLedgerUpdate(args.workerId);
+
+    if (this.db) {
+      await this.db.updateJob(job);
+      await this.db.upsertLedger({
+        agentId: job.requesterId,
+        credits: requesterAcct.credits,
+        locked: requesterAcct.locked,
+      });
+      await this.db.upsertLedger({ agentId: args.workerId, credits: workerAcct.credits, locked: workerAcct.locked });
+      void this.db.insertEvent({ kind: 'job_completed', payload: completed });
+    }
+
+    void args.result;
+  }
+
+  async systemLinkGithubIssue(args: { owner: string; repo: string; issueNumber: number; jobId: string }) {
+    const key = `${args.owner}/${args.repo}#${Math.floor(args.issueNumber)}`;
+    this.githubIssueToJobId.set(key, args.jobId);
+    if (this.db) await this.db.upsertGithubIssueJobLink({ ...args, issueNumber: Math.floor(args.issueNumber) });
+  }
+
+  async systemLinkGithubPr(args: { owner: string; repo: string; prNumber: number; jobId: string; headSha?: string }) {
+    const key = `${args.owner}/${args.repo}#${Math.floor(args.prNumber)}`;
+    this.githubPrToJobId.set(key, args.jobId);
+    if (this.db) {
+      await this.db.upsertGithubPrJobLink({
+        owner: args.owner,
+        repo: args.repo,
+        prNumber: Math.floor(args.prNumber),
+        jobId: args.jobId,
+        headSha: args.headSha ?? null,
+      });
+    }
+  }
+
+  async systemGetJobIdByGithubIssue(args: { owner: string; repo: string; issueNumber: number }): Promise<string | null> {
+    const key = `${args.owner}/${args.repo}#${Math.floor(args.issueNumber)}`;
+    if (this.db) return await this.db.getGithubJobIdByIssue(args);
+    return this.githubIssueToJobId.get(key) ?? null;
+  }
+
+  async systemGetJobIdByGithubPr(args: { owner: string; repo: string; prNumber: number }): Promise<string | null> {
+    const key = `${args.owner}/${args.repo}#${Math.floor(args.prNumber)}`;
+    if (this.db) return await this.db.getGithubJobIdByPr(args);
+    return this.githubPrToJobId.get(key) ?? null;
   }
 
   private async handlePostJob(session: Session, msg: AgentToServerMsg & { type: 'post_job' }) {
@@ -481,13 +702,11 @@ export class CoreServer extends EventEmitter {
     if (this.db) return await this.db.getObserverSnapshot();
 
     const agents: ObserverSnapshot['agents'] = [];
-    for (const session of this.sessions.values()) {
-      if (!session.authed || !session.agentId || !session.agentName) continue;
-      const acct = this.ledger.get(session.agentId);
-      if (!acct) continue;
+    for (const [agentId, acct] of this.ledger.entries()) {
+      const meta = this.agentMeta.get(agentId);
       agents.push({
-        agentId: session.agentId,
-        agentName: session.agentName,
+        agentId,
+        agentName: meta?.agentName ?? agentId.slice(0, 8),
         credits: acct.credits,
         locked: acct.locked,
       });

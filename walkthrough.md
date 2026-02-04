@@ -35,9 +35,26 @@ What it does:
 - worker generates code (mocked unless you provide `OPENAI_API_KEY`)
 - server evaluates the submission and pays only if tests pass
 
+## Phase 5 (WIP): GitHub PR-bounty loop (fast production path)
+Dev server includes a GitHub webhook endpoint:
+- `http://localhost:8791/github/webhook` (configurable via `SYNAPSE_GH_WEBHOOK_PORT`)
+
+How it works (MVP):
+1) Create an issue in a repo with either:
+   - label `synapse`, or
+   - a title starting with `[synapse]`
+2) Put a budget in the issue body (optional):
+   - `budget: 333`
+3) Open a PR that references the issue in the PR body:
+   - `Synapse-Job: 12`
+4) When GitHub Actions finishes and `check_suite.conclusion == success`, Synapse settles the bounty.
+
+Env:
+- Set `GITHUB_WEBHOOK_SECRET` to verify signatures (recommended even for local testing).
+- Set `SYNAPSE_GH_PAY_ON=merge` to pay only when PR is merged (instead of on checks success).
+
 ## Tests
 - `npm test`
 
 DB integration test:
 - `tests/db.integration.test.ts` becomes meaningful when `DATABASE_URL` points at a running Postgres.
-

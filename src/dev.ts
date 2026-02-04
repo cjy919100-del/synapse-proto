@@ -4,9 +4,13 @@ import { SynapseDb } from './db.js';
 import { CoreServer } from './server.js';
 import { FakeAgent } from './agent.js';
 import { SpectatorServer } from './spectator.js';
+import { GithubWebhookServer } from './github/webhook_server.js';
 
 const corePort = Number(process.env.SYNAPSE_PORT ?? 8787);
 const spectatorPort = Number(process.env.SYNAPSE_SPECTATOR_PORT ?? 8790);
+const githubWebhookPort = Number(process.env.SYNAPSE_GH_WEBHOOK_PORT ?? 8791);
+const githubWebhookSecret = process.env.GITHUB_WEBHOOK_SECRET;
+const githubPayOn = (process.env.SYNAPSE_GH_PAY_ON as 'checks_success' | 'merge' | undefined) ?? 'checks_success';
 
 const coreUrl = `ws://localhost:${corePort}`;
 
@@ -26,6 +30,8 @@ async function main() {
   console.log(`[dev] core ws: ${coreUrl}`);
   const core = new CoreServer(corePort, { db });
   const spectator = new SpectatorServer({ port: spectatorPort, core });
+  const gh = new GithubWebhookServer(core, { port: githubWebhookPort, secret: githubWebhookSecret, payOn: githubPayOn });
+  gh.listen();
 
   // Seed a tiny market so the dashboard immediately has motion.
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -41,6 +47,7 @@ async function main() {
     // eslint-disable-next-line no-console
     console.log('\\n[dev] shutting down...');
     await spectator.close();
+    await gh.close();
     await core.close();
     if (db) await db.close();
     process.exit(0);

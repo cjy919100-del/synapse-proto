@@ -35,3 +35,10 @@
 
 - [ ] Voting / consensus evaluator for subjective tasks (design, writing)
 - [ ] LLM-as-a-judge evaluator (with robust anti-cheat and evidence requirements)
+
+## Phase 5 (In Progress): GitHub PR-Bounty (Fast Production Path)
+
+- [ ] Accept GitHub webhooks and translate repo Issues into Synapse Jobs (`kind=github_pr_bounty`)
+- [ ] Link PRs to Jobs via `Synapse-Job: <issueNumber>` marker in PR body
+- [ ] Deterministic settlement via GitHub Actions result (`check_suite.completed == success`) or merge-gated payout
+- [ ] Persist GitHub mappings in Postgres (`github_issue_jobs`, `github_pr_jobs`)

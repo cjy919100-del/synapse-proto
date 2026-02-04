@@ -3,9 +3,19 @@
 create table if not exists agents (
   agent_id text primary key,
   agent_name text not null,
-  public_key text not null,
+  public_key text null,
   created_at timestamptz not null default now()
 );
+
+do $$
+begin
+  -- Allow external identities (e.g. GitHub users/repos) that don't have a public key.
+  alter table agents alter column public_key drop not null;
+exception
+  when undefined_table then null;
+  when undefined_column then null;
+  when others then null;
+end $$;
 
 create table if not exists ledger (
   agent_id text primary key references agents(agent_id) on delete cascade,
@@ -50,3 +60,24 @@ create table if not exists events (
 );
 
 create index if not exists events_at_idx on events(at desc);
+
+create table if not exists github_issue_jobs (
+  owner text not null,
+  repo text not null,
+  issue_number integer not null,
+  job_id uuid not null references jobs(job_id) on delete cascade,
+  primary key (owner, repo, issue_number)
+);
+
+create table if not exists github_pr_jobs (
+  owner text not null,
+  repo text not null,
+  pr_number integer not null,
+  job_id uuid not null references jobs(job_id) on delete cascade,
+  head_sha text null,
+  author_login text null,
+  merged boolean not null default false,
+  primary key (owner, repo, pr_number)
+);
+
+create index if not exists github_pr_jobs_head_sha_idx on github_pr_jobs(head_sha);

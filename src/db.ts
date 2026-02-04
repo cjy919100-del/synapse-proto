@@ -25,7 +25,7 @@ export class SynapseDb {
     await this.pool.query(SCHEMA_SQL);
   }
 
-  async upsertAgent(args: { agentId: string; agentName: string; publicKeyDerB64: string }): Promise<void> {
+  async upsertAgent(args: { agentId: string; agentName: string; publicKeyDerB64?: string | null }): Promise<void> {
     await this.pool.query(
       `
       insert into agents (agent_id, agent_name, public_key)
@@ -34,7 +34,7 @@ export class SynapseDb {
         agent_name = excluded.agent_name,
         public_key = excluded.public_key
       `,
-      [args.agentId, args.agentName, args.publicKeyDerB64],
+      [args.agentId, args.agentName, args.publicKeyDerB64 ?? null],
     );
   }
 
@@ -117,6 +117,80 @@ export class SynapseDb {
     await this.pool.query(`insert into events (kind, payload) values ($1, $2)`, [args.kind, args.payload]);
   }
 
+  async upsertGithubIssueJobLink(args: {
+    owner: string;
+    repo: string;
+    issueNumber: number;
+    jobId: string;
+  }): Promise<void> {
+    await this.pool.query(
+      `
+      insert into github_issue_jobs (owner, repo, issue_number, job_id)
+      values ($1, $2, $3, $4)
+      on conflict (owner, repo, issue_number) do update set
+        job_id = excluded.job_id
+      `,
+      [args.owner, args.repo, Math.floor(args.issueNumber), args.jobId],
+    );
+  }
+
+  async getGithubJobIdByIssue(args: { owner: string; repo: string; issueNumber: number }): Promise<string | null> {
+    const res = await this.pool.query(
+      `
+      select job_id
+      from github_issue_jobs
+      where owner = $1 and repo = $2 and issue_number = $3
+      `,
+      [args.owner, args.repo, Math.floor(args.issueNumber)],
+    );
+    if (res.rowCount === 0) return null;
+    return String(res.rows[0]!.job_id);
+  }
+
+  async upsertGithubPrJobLink(args: {
+    owner: string;
+    repo: string;
+    prNumber: number;
+    jobId: string;
+    headSha?: string | null;
+    authorLogin?: string | null;
+    merged?: boolean;
+  }): Promise<void> {
+    await this.pool.query(
+      `
+      insert into github_pr_jobs (owner, repo, pr_number, job_id, head_sha, author_login, merged)
+      values ($1, $2, $3, $4, $5, $6, $7)
+      on conflict (owner, repo, pr_number) do update set
+        job_id = excluded.job_id,
+        head_sha = coalesce(excluded.head_sha, github_pr_jobs.head_sha),
+        author_login = coalesce(excluded.author_login, github_pr_jobs.author_login),
+        merged = excluded.merged
+      `,
+      [
+        args.owner,
+        args.repo,
+        Math.floor(args.prNumber),
+        args.jobId,
+        args.headSha ?? null,
+        args.authorLogin ?? null,
+        Boolean(args.merged),
+      ],
+    );
+  }
+
+  async getGithubJobIdByPr(args: { owner: string; repo: string; prNumber: number }): Promise<string | null> {
+    const res = await this.pool.query(
+      `
+      select job_id
+      from github_pr_jobs
+      where owner = $1 and repo = $2 and pr_number = $3
+      `,
+      [args.owner, args.repo, Math.floor(args.prNumber)],
+    );
+    if (res.rowCount === 0) return null;
+    return String(res.rows[0]!.job_id);
+  }
+
   async getObserverSnapshot(): Promise<ObserverSnapshot> {
     const agentsRes = await this.pool.query(
       `
@@ -176,9 +250,19 @@ const SCHEMA_SQL = `
 create table if not exists agents (
   agent_id text primary key,
   agent_name text not null,
-  public_key text not null,
+  public_key text null,
   created_at timestamptz not null default now()
 );
+
+do $$
+begin
+  -- Allow external identities (e.g. GitHub users/repos) that don't have a public key.
+  alter table agents alter column public_key drop not null;
+exception
+  when undefined_table then null;
+  when undefined_column then null;
+  when others then null;
+end $$;
 
 create table if not exists ledger (
   agent_id text primary key references agents(agent_id) on delete cascade,
@@ -223,4 +307,25 @@ create table if not exists events (
 );
 
 create index if not exists events_at_idx on events(at desc);
+
+create table if not exists github_issue_jobs (
+  owner text not null,
+  repo text not null,
+  issue_number integer not null,
+  job_id uuid not null references jobs(job_id) on delete cascade,
+  primary key (owner, repo, issue_number)
+);
+
+create table if not exists github_pr_jobs (
+  owner text not null,
+  repo text not null,
+  pr_number integer not null,
+  job_id uuid not null references jobs(job_id) on delete cascade,
+  head_sha text null,
+  author_login text null,
+  merged boolean not null default false,
+  primary key (owner, repo, pr_number)
+);
+
+create index if not exists github_pr_jobs_head_sha_idx on github_pr_jobs(head_sha);
 `;
