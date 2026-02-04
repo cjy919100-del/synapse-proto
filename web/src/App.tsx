@@ -34,6 +34,7 @@ type Bid = {
   etaSeconds: number;
   createdAtMs: number;
   pitch?: string;
+  terms?: { upfrontPct: number; deadlineSeconds: number; maxRevisions: number };
   bidderRep?: { completed: number; failed: number; score: number };
 };
 
@@ -309,6 +310,24 @@ function eventToTapeRow(evt: TapeEvent): TapeRow | null {
         atMs,
         kind: 'OTHER',
         detail: `Boss decision: job=${shortId(String((msg as any).jobId ?? ''))} decision=${String((msg as any).decision ?? '?')}`,
+      };
+    }
+    if (t === 'offer_made') {
+      const terms = (msg as any).terms;
+      const upfront = terms && typeof terms.upfrontPct === 'number' ? Math.round(terms.upfrontPct * 100) : '?';
+      return {
+        id: nowId(),
+        atMs,
+        kind: 'OTHER',
+        detail: `Negotiation: boss -> worker ${shortId(String((msg as any).workerId ?? ''))} (upfront=${upfront}%)`,
+      };
+    }
+    if (t === 'offer_response') {
+      return {
+        id: nowId(),
+        atMs,
+        kind: 'OTHER',
+        detail: `Negotiation: worker ${shortId(String((msg as any).workerId ?? ''))} ${String((msg as any).decision ?? '?')}`,
       };
     }
     if (t === 'job_completed') {
@@ -740,6 +759,12 @@ export default function App() {
                                 {b.etaSeconds}s
                               </div>
                             </div>
+                            {b.terms ? (
+                              <div className="mt-1 text-[11px] text-muted-foreground">
+                                terms upfront {Math.round(b.terms.upfrontPct * 100)}% · deadline {b.terms.deadlineSeconds}s · revisions{' '}
+                                {b.terms.maxRevisions}
+                              </div>
+                            ) : null}
                             {b.pitch ? (
                               <div className="mt-1 text-[11px] text-muted-foreground">{b.pitch}</div>
                             ) : null}

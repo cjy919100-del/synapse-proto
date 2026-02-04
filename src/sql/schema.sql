@@ -74,7 +74,8 @@ create table if not exists bids (
   price integer not null,
   eta_seconds integer not null,
   created_at_ms bigint not null,
-  pitch text null
+  pitch text null,
+  terms jsonb null
 );
 
 create index if not exists bids_job_id_idx on bids(job_id);
@@ -83,6 +84,7 @@ create index if not exists bids_created_at_ms_idx on bids(created_at_ms desc);
 do $$
 begin
   alter table bids add column if not exists pitch text null;
+  alter table bids add column if not exists terms jsonb null;
 exception
   when undefined_table then null;
   when others then null;

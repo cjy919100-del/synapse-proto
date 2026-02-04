@@ -25,6 +25,8 @@ import {
   type JobFailedMsg,
   type JobSubmittedMsg,
   type JobReviewedMsg,
+  type OfferMadeMsg,
+  type OfferResponseMsg,
 } from './protocol.js';
 import { evaluateSubmission } from './evaluator.js';
 
@@ -52,7 +54,10 @@ type JobState = Job & {
   lockedBudget: number;
   lockedStake: number;
   awardedAtMs?: number;
+  paidUpfront: number;
 };
+
+type Terms = NonNullable<Bid['terms']>;
 
 const DEFAULT_STARTING_CREDITS = 1_000;
 const DEFAULT_WORKER_STAKE_PCT = 0.05;
@@ -178,6 +183,10 @@ export class CoreServer extends EventEmitter {
         return await this.handleBid(session, msg);
       case 'award':
         return await this.handleAward(session, msg);
+      case 'counter_offer':
+        return await this.handleCounterOffer(session, msg);
+      case 'offer_decision':
+        return await this.handleOfferDecision(session, msg);
       case 'submit':
         return await this.handleSubmit(session, msg);
       case 'review':
@@ -407,6 +416,7 @@ export class CoreServer extends EventEmitter {
       lockedStake: 0,
       kind: args.kind,
       payload: args.payload ?? {},
+      paidUpfront: 0,
     };
     this.jobs.set(jobId, job);
 
@@ -532,9 +542,10 @@ export class CoreServer extends EventEmitter {
     const workerAcct = this.ledger.get(args.workerId);
     if (!requesterAcct || !workerAcct) throw new Error('ledger_missing');
 
-    requesterAcct.locked -= job.lockedBudget;
-    requesterAcct.credits -= job.lockedBudget;
-    workerAcct.credits += job.lockedBudget;
+    const remainder = Math.max(0, job.lockedBudget - job.paidUpfront);
+    requesterAcct.locked -= remainder;
+    requesterAcct.credits -= remainder;
+    workerAcct.credits += remainder;
     this.bumpReputation(args.workerId, 'completed');
 
     const stake = job.lockedStake;
@@ -546,8 +557,8 @@ export class CoreServer extends EventEmitter {
     await this.addEvidence({
       jobId: job.id,
       kind: 'settlement',
-      detail: `success paid=${job.lockedBudget} stake_unlocked=${stake}`,
-      payload: { paid: job.lockedBudget, stakeUnlocked: stake },
+      detail: `success paid_total=${job.lockedBudget} paid_upfront=${job.paidUpfront} paid_remainder=${remainder} stake_unlocked=${stake}`,
+      payload: { paidTotal: job.lockedBudget, paidUpfront: job.paidUpfront, paidRemainder: remainder, stakeUnlocked: stake },
     });
 
     const completed: JobCompletedMsg = {
@@ -586,7 +597,8 @@ export class CoreServer extends EventEmitter {
     this.bumpReputation(args.workerId, 'failed');
 
     const requesterAcct = this.ledger.get(job.requesterId);
-    if (requesterAcct) requesterAcct.locked -= job.lockedBudget;
+    const refund = Math.max(0, job.lockedBudget - job.paidUpfront);
+    if (requesterAcct) requesterAcct.locked -= refund;
 
     const workerAcct = this.ledger.get(args.workerId);
     const stake = job.lockedStake;
@@ -603,8 +615,8 @@ export class CoreServer extends EventEmitter {
     await this.addEvidence({
       jobId: job.id,
       kind: 'settlement',
-      detail: `failed reason=${args.reason} stake_unlocked=${stake} slash=${slash}`,
-      payload: { reason: args.reason, stakeUnlocked: stake, slash },
+      detail: `failed reason=${args.reason} refund_locked=${refund} paid_upfront=${job.paidUpfront} stake_unlocked=${stake} slash=${slash}`,
+      payload: { reason: args.reason, refundLocked: refund, paidUpfront: job.paidUpfront, stakeUnlocked: stake, slash },
     });
 
     const failedMsg: JobFailedMsg = {
@@ -725,6 +737,7 @@ export class CoreServer extends EventEmitter {
       lockedStake: 0,
       kind: msg.kind || 'simple',
       payload: msg.payload || {},
+      paidUpfront: 0,
     };
     this.jobs.set(jobId, job);
 
@@ -747,6 +760,7 @@ export class CoreServer extends EventEmitter {
     if (!job) return this.fail(session.ws, 'job_not_found');
     if (job.status !== 'open') return this.fail(session.ws, 'job_not_open');
     // Zod checked price/eta > 0
+    if (msg.price > job.budget) return this.fail(session.ws, 'bid_over_budget');
 
     const bid: Bid = {
       id: crypto.randomUUID(),
@@ -756,6 +770,7 @@ export class CoreServer extends EventEmitter {
       etaSeconds: Math.floor(msg.etaSeconds),
       createdAtMs: Date.now(),
       pitch: msg.pitch,
+      terms: msg.terms,
       bidderRep: (() => {
         const rep = this.reputation.get(bidderId) ?? { completed: 0, failed: 0 };
         return { completed: rep.completed, failed: rep.failed, score: this.repScore(rep) };
@@ -780,21 +795,38 @@ export class CoreServer extends EventEmitter {
     const requesterId = session.agentId!;
     const job = this.jobs.get(msg.jobId);
     if (!job) return this.fail(session.ws, 'job_not_found');
-    if (job.requesterId !== requesterId) return this.fail(session.ws, 'not_job_owner');
-    if (job.status !== 'open') return this.fail(session.ws, 'job_not_open');
+    await this.awardJob({
+      requesterId,
+      job,
+      workerId: msg.workerId,
+      notes: msg.notes,
+      errWs: session.ws,
+    });
+  }
 
-    const workerId = msg.workerId;
+  private async awardJob(args: {
+    requesterId: string;
+    job: JobState;
+    workerId: string;
+    notes?: string;
+    errWs: WebSocket | null;
+  }) {
+    const { requesterId, job, workerId } = args;
+    if (job.requesterId !== requesterId) return args.errWs ? this.fail(args.errWs, 'not_job_owner') : undefined;
+    if (job.status !== 'open') return args.errWs ? this.fail(args.errWs, 'job_not_open') : undefined;
+
     const hasBid = job.bids.some((b) => b.bidderId === workerId);
-    if (!hasBid) return this.fail(session.ws, 'worker_has_no_bid');
+    if (!hasBid) return args.errWs ? this.fail(args.errWs, 'worker_has_no_bid') : undefined;
 
     const acct = this.ledger.get(requesterId);
-    if (!acct) return this.fail(session.ws, 'no_ledger_account');
-    if (acct.credits - acct.locked < job.budget) return this.fail(session.ws, 'insufficient_credits');
+    if (!acct) return args.errWs ? this.fail(args.errWs, 'no_ledger_account') : undefined;
+    if (acct.credits - acct.locked < job.budget) return args.errWs ? this.fail(args.errWs, 'insufficient_credits') : undefined;
 
     const workerAcct = this.ledger.get(workerId);
-    if (!workerAcct) return this.fail(session.ws, 'worker_no_ledger_account');
+    if (!workerAcct) return args.errWs ? this.fail(args.errWs, 'worker_no_ledger_account') : undefined;
     const stake = this.workerStakeFor(job, workerId);
-    if (stake > 0 && workerAcct.credits - workerAcct.locked < stake) return this.fail(session.ws, 'worker_insufficient_stake');
+    if (stake > 0 && workerAcct.credits - workerAcct.locked < stake)
+      return args.errWs ? this.fail(args.errWs, 'worker_insufficient_stake') : undefined;
 
     acct.locked += job.budget;
     job.lockedBudget = job.budget;
@@ -816,16 +848,41 @@ export class CoreServer extends EventEmitter {
     await this.addEvidence({
       jobId: job.id,
       kind: 'award',
-      detail: `worker=${workerId.slice(0, 12)} budget_locked=${job.budget} stake_locked=${stake}${msg.notes ? ` notes=${msg.notes}` : ''}`,
-      payload: { workerId, budgetLocked: job.budget, stakeLocked: stake, notes: msg.notes ?? null },
+      detail: `worker=${workerId.slice(0, 12)} budget_locked=${job.budget} stake_locked=${stake}${args.notes ? ` notes=${args.notes}` : ''}`,
+      payload: { workerId, budgetLocked: job.budget, stakeLocked: stake, notes: args.notes ?? null },
     });
+
+    const acceptedTerms = (job.payload as any)?.acceptedTerms as Terms | undefined;
+    let didPayUpfront = false;
+    if (acceptedTerms) {
+      const upfront = Math.max(0, Math.min(job.lockedBudget, Math.floor(job.lockedBudget * acceptedTerms.upfrontPct)));
+      if (upfront > 0) {
+        // Upfront is a non-refundable deposit: move from requester credits to worker credits immediately.
+        acct.locked -= upfront;
+        acct.credits -= upfront;
+        workerAcct.credits += upfront;
+        job.paidUpfront = upfront;
+        didPayUpfront = true;
+        this.sendLedgerUpdate(job.requesterId);
+        this.sendLedgerUpdate(workerId);
+        await this.addEvidence({
+          jobId: job.id,
+          kind: 'upfront',
+          detail: `paid_upfront=${upfront} pct=${acceptedTerms.upfrontPct}`,
+          payload: { upfront, upfrontPct: acceptedTerms.upfrontPct },
+        });
+      }
+    }
+
     this.armTimeout(job.id);
 
     if (this.db) {
       try {
         await this.db.updateJob(job);
         await this.db.upsertLedger({ agentId: requesterId, credits: acct.credits, locked: acct.locked });
-        if (stake > 0) await this.db.upsertLedger({ agentId: workerId, credits: workerAcct.credits, locked: workerAcct.locked });
+        if (stake > 0 || didPayUpfront) {
+          await this.db.upsertLedger({ agentId: workerId, credits: workerAcct.credits, locked: workerAcct.locked });
+        }
         void this.db.insertEvent({ kind: 'job_awarded', payload: out });
       } catch (err) {
         this.log(`[server] db_error_job_awarded: ${(err as Error).message}`);
@@ -927,6 +984,105 @@ export class CoreServer extends EventEmitter {
     await this.addEvidence({ jobId: job.id, kind: 'changes', detail: msg.notes ?? 'changes requested' });
     this.armTimeout(job.id);
     if (this.db) await this.db.updateJob(job);
+  }
+
+  private async handleCounterOffer(session: Session, msg: AgentToServerMsg & { type: 'counter_offer' }) {
+    const requesterId = session.agentId!;
+    const job = this.jobs.get(msg.jobId);
+    if (!job) return this.fail(session.ws, 'job_not_found');
+    if (job.requesterId !== requesterId) return this.fail(session.ws, 'not_job_owner');
+    if (job.status !== 'open') return this.fail(session.ws, 'job_not_open');
+
+    const workerId = msg.workerId;
+    const bid = job.bids.find((b) => b.bidderId === workerId);
+    if (!bid) return this.fail(session.ws, 'worker_has_no_bid');
+
+    const offer: OfferMadeMsg = {
+      v: PROTOCOL_VERSION,
+      type: 'offer_made',
+      jobId: job.id,
+      requesterId,
+      workerId,
+      terms: msg.terms,
+      notes: msg.notes,
+    };
+    this.broadcast(offer);
+    await this.addEvidence({
+      jobId: job.id,
+      kind: 'offer',
+      detail: `boss -> worker=${workerId.slice(0, 12)} upfront=${msg.terms.upfrontPct} deadline=${msg.terms.deadlineSeconds}s rev=${msg.terms.maxRevisions}${
+        msg.notes ? ` notes=${msg.notes}` : ''
+      }`,
+      payload: offer,
+    });
+
+    // Remember the active offer on the job.
+    job.payload = {
+      ...(job.payload ?? {}),
+      negotiation: {
+        workerId,
+        bidId: bid.id,
+        bidPrice: bid.price,
+        terms: msg.terms,
+        notes: msg.notes ?? null,
+        status: 'pending',
+        atMs: Date.now(),
+      },
+    };
+    if (this.db) await this.db.updateJob(job);
+  }
+
+  private async handleOfferDecision(session: Session, msg: AgentToServerMsg & { type: 'offer_decision' }) {
+    const workerId = session.agentId!;
+    const job = this.jobs.get(msg.jobId);
+    if (!job) return this.fail(session.ws, 'job_not_found');
+
+    const negotiation = (job.payload as any)?.negotiation as
+      | { workerId: string; bidPrice: number; terms: Terms; status: string }
+      | undefined;
+    if (!negotiation) return this.fail(session.ws, 'no_active_offer');
+    if (negotiation.workerId !== workerId) return this.fail(session.ws, 'not_offer_target');
+    if (job.status !== 'open') return this.fail(session.ws, 'job_not_open');
+    if (msg.requesterId !== job.requesterId) return this.fail(session.ws, 'bad_requester');
+
+    const out: OfferResponseMsg = {
+      v: PROTOCOL_VERSION,
+      type: 'offer_response',
+      jobId: job.id,
+      requesterId: job.requesterId,
+      workerId,
+      decision: msg.decision,
+      notes: msg.notes,
+    };
+    this.broadcast(out);
+    await this.addEvidence({
+      jobId: job.id,
+      kind: 'offer_response',
+      detail: `worker=${workerId.slice(0, 12)} decision=${msg.decision}${msg.notes ? ` notes=${msg.notes}` : ''}`,
+      payload: out,
+    });
+
+    (job.payload as any).negotiation = { ...(job.payload as any).negotiation, status: msg.decision, decidedAtMs: Date.now() };
+    if (this.db) await this.db.updateJob(job);
+
+    if (msg.decision === 'reject') return;
+
+    // Accept: award the job to this worker and embed the accepted terms.
+    (job.payload as any).acceptedTerms = negotiation.terms;
+    await this.addEvidence({
+      jobId: job.id,
+      kind: 'negotiation',
+      detail: `accepted upfront=${negotiation.terms.upfrontPct} deadline=${negotiation.terms.deadlineSeconds}s rev=${negotiation.terms.maxRevisions}`,
+    });
+
+    await this.awardJob({
+      requesterId: job.requesterId,
+      job,
+      workerId,
+      notes: `offer_accept upfront=${negotiation.terms.upfrontPct} deadline=${negotiation.terms.deadlineSeconds}s rev=${negotiation.terms.maxRevisions}`,
+      // If something goes wrong (e.g., budget drained), the worker sees it.
+      errWs: session.ws,
+    });
   }
   private sendLedgerUpdate(agentId: string) {
     const acct = this.ledger.get(agentId);

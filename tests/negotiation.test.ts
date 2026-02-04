@@ -1,0 +1,182 @@
+import WebSocket from 'ws';
+import { afterAll, beforeAll, test } from 'vitest';
+
+import { generateEd25519KeyPair, signAuth } from '../src/crypto.js';
+import { PROTOCOL_VERSION } from '../src/protocol.js';
+import { CoreServer } from '../src/server.js';
+
+type AnyMsg = Record<string, unknown> & { type: string; v: number };
+
+function waitFor(
+  ws: WebSocket,
+  predicate: (msg: AnyMsg) => boolean,
+  timeoutMs = 7_500,
+  label = 'waitFor',
+): Promise<AnyMsg> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => {
+      cleanup();
+      reject(new Error(`timeout: ${label}`));
+    }, timeoutMs);
+
+    const onMessage = (raw: WebSocket.RawData) => {
+      let msg: unknown;
+      try {
+        msg = JSON.parse(raw.toString('utf8'));
+      } catch {
+        return;
+      }
+      if (!msg || typeof msg !== 'object') return;
+      const m = msg as AnyMsg;
+      if (m.v !== PROTOCOL_VERSION || typeof m.type !== 'string') return;
+      if (!predicate(m)) return;
+      cleanup();
+      resolve(m);
+    };
+
+    const onError = (err: Error) => {
+      cleanup();
+      reject(err);
+    };
+
+    const cleanup = () => {
+      clearTimeout(t);
+      ws.off('message', onMessage);
+      ws.off('error', onError);
+    };
+
+    ws.on('message', onMessage);
+    ws.on('error', onError);
+  });
+}
+
+async function connectAuthed(url: string, agentName: string) {
+  const keyPair = generateEd25519KeyPair();
+  const ws = new WebSocket(url);
+
+  const challenge = await waitFor(ws, (m) => m.type === 'challenge');
+  const nonce = String(challenge.nonce);
+
+  const signature = signAuth({
+    nonceB64: nonce,
+    agentName,
+    publicKeyDerB64: keyPair.publicKeyDerB64,
+    privateKey: keyPair.privateKey,
+  });
+
+  ws.send(
+    JSON.stringify({
+      v: PROTOCOL_VERSION,
+      type: 'auth',
+      agentName,
+      publicKey: keyPair.publicKeyDerB64,
+      signature,
+      nonce,
+    }),
+  );
+
+  const authed = await waitFor(ws, (m) => m.type === 'authed');
+  return { ws, agentId: String(authed.agentId), credits: Number(authed.credits) };
+}
+
+let server: CoreServer;
+let url: string;
+
+beforeAll(() => {
+  server = new CoreServer(0);
+  url = `ws://127.0.0.1:${server.getListeningPort()}`;
+});
+
+afterAll(async () => {
+  await server.close();
+});
+
+test('negotiation: counter-offer -> accept -> upfront paid -> settle remainder', async () => {
+  const requester = await connectAuthed(url, 'boss');
+  const worker = await connectAuthed(url, 'worker');
+
+  // boss posts job with known budget
+  requester.ws.send(
+    JSON.stringify({
+      v: PROTOCOL_VERSION,
+      type: 'post_job',
+      title: 'task: one-liner',
+      budget: 100,
+    }),
+  );
+  const jobPosted = await waitFor(requester.ws, (m) => m.type === 'job_posted');
+  const jobId = String((jobPosted as any).job.id);
+
+  // worker bids with terms
+  worker.ws.send(
+    JSON.stringify({
+      v: PROTOCOL_VERSION,
+      type: 'bid',
+      jobId,
+      price: 80,
+      etaSeconds: 2,
+      terms: { upfrontPct: 0.2, deadlineSeconds: 10, maxRevisions: 1 },
+      pitch: 'ready',
+    }),
+  );
+
+  const bidPosted = await waitFor(requester.ws, (m) => m.type === 'bid_posted' && String((m as any).bid.jobId) === jobId);
+  const workerId = String((bidPosted as any).bid.bidderId);
+
+  // boss counter-offers (same terms for determinism)
+  requester.ws.send(
+    JSON.stringify({
+      v: PROTOCOL_VERSION,
+      type: 'counter_offer',
+      jobId,
+      workerId,
+      terms: { upfrontPct: 0.2, deadlineSeconds: 8, maxRevisions: 1 },
+      notes: 'deal?',
+    }),
+  );
+
+  await waitFor(worker.ws, (m) => m.type === 'offer_made' && String((m as any).jobId) === jobId);
+
+  // Start waiting before accepting so we don't miss fast ledger broadcasts at award time.
+  const pOfferResponse = waitFor(requester.ws, (m) => m.type === 'offer_response' && String((m as any).jobId) === jobId);
+  const pAwarded = waitFor(worker.ws, (m) => m.type === 'job_awarded' && String((m as any).jobId) === jobId);
+  const pRequesterUpfrontLedger = waitFor(
+    requester.ws,
+    (m) => m.type === 'ledger_update' && Number((m as any).credits) === requester.credits - 20 && Number((m as any).locked) === 80,
+  );
+  const pWorkerUpfrontLedger = waitFor(worker.ws, (m) => m.type === 'ledger_update' && Number((m as any).credits) === worker.credits + 20);
+
+  worker.ws.send(
+    JSON.stringify({
+      v: PROTOCOL_VERSION,
+      type: 'offer_decision',
+      jobId,
+      requesterId: requester.agentId,
+      decision: 'accept',
+      notes: 'ok',
+    }),
+  );
+
+  await Promise.all([pOfferResponse, pAwarded, pRequesterUpfrontLedger, pWorkerUpfrontLedger]);
+
+  // submit -> boss review accept -> settle (remainder 80 paid)
+  const pSubmitted = waitFor(requester.ws, (m) => m.type === 'job_submitted' && String((m as any).jobId) === jobId);
+  worker.ws.send(JSON.stringify({ v: PROTOCOL_VERSION, type: 'submit', jobId, result: 'done' }));
+  await pSubmitted;
+
+  const pCompleted = waitFor(requester.ws, (m) => m.type === 'job_completed' && String((m as any).jobId) === jobId);
+  const pRequesterFinal = waitFor(
+    requester.ws,
+    (m) => m.type === 'ledger_update' && Number((m as any).credits) === requester.credits - 100 && Number((m as any).locked) === 0,
+  );
+  const pWorkerFinal = waitFor(
+    worker.ws,
+    (m) => m.type === 'ledger_update' && Number((m as any).credits) === worker.credits + 100 && Number((m as any).locked) === 0,
+  );
+
+  requester.ws.send(JSON.stringify({ v: PROTOCOL_VERSION, type: 'review', jobId, decision: 'accept' }));
+  await Promise.all([pCompleted, pRequesterFinal, pWorkerFinal]);
+
+  requester.ws.close();
+  worker.ws.close();
+});

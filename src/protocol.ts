@@ -62,6 +62,13 @@ export const BidSchema = z.object({
   etaSeconds: z.number().positive(),
   createdAtMs: z.number(),
   pitch: z.string().optional(),
+  terms: z
+    .object({
+      upfrontPct: z.number().min(0).max(1),
+      deadlineSeconds: z.number().positive(),
+      maxRevisions: z.number().int().min(0).max(10),
+    })
+    .optional(),
   bidderRep: z
     .object({
       completed: z.number().nonnegative(),
@@ -97,6 +104,13 @@ export const BidMsgSchema = z.object({
   price: z.number().positive(),
   etaSeconds: z.number().positive(),
   pitch: z.string().optional(),
+  terms: z
+    .object({
+      upfrontPct: z.number().min(0).max(1),
+      deadlineSeconds: z.number().positive(),
+      maxRevisions: z.number().int().min(0).max(10),
+    })
+    .optional(),
 });
 export type BidMsg = z.infer<typeof BidMsgSchema>;
 
@@ -115,6 +129,56 @@ export const AwardMsgSchema = z.object({
   notes: z.string().optional(),
 });
 export type AwardMsg = z.infer<typeof AwardMsgSchema>;
+
+export const CounterOfferMsgSchema = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  type: z.literal('counter_offer'),
+  jobId: z.string(),
+  workerId: z.string(),
+  terms: z.object({
+    upfrontPct: z.number().min(0).max(1),
+    deadlineSeconds: z.number().positive(),
+    maxRevisions: z.number().int().min(0).max(10),
+  }),
+  notes: z.string().optional(),
+});
+export type CounterOfferMsg = z.infer<typeof CounterOfferMsgSchema>;
+
+export const OfferDecisionMsgSchema = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  type: z.literal('offer_decision'),
+  jobId: z.string(),
+  requesterId: z.string(),
+  decision: z.enum(['accept', 'reject']),
+  notes: z.string().optional(),
+});
+export type OfferDecisionMsg = z.infer<typeof OfferDecisionMsgSchema>;
+
+export const OfferMadeMsgSchema = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  type: z.literal('offer_made'),
+  jobId: z.string(),
+  requesterId: z.string(),
+  workerId: z.string(),
+  terms: z.object({
+    upfrontPct: z.number().min(0).max(1),
+    deadlineSeconds: z.number().positive(),
+    maxRevisions: z.number().int().min(0).max(10),
+  }),
+  notes: z.string().optional(),
+});
+export type OfferMadeMsg = z.infer<typeof OfferMadeMsgSchema>;
+
+export const OfferResponseMsgSchema = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  type: z.literal('offer_response'),
+  jobId: z.string(),
+  requesterId: z.string(),
+  workerId: z.string(),
+  decision: z.enum(['accept', 'reject']),
+  notes: z.string().optional(),
+});
+export type OfferResponseMsg = z.infer<typeof OfferResponseMsgSchema>;
 
 export const JobAwardedMsgSchema = z.object({
   v: z.literal(PROTOCOL_VERSION),
@@ -195,6 +259,8 @@ export const ServerToAgentMsgSchema = z.discriminatedUnion('type', [
   JobPostedMsgSchema,
   BidPostedMsgSchema,
   JobAwardedMsgSchema,
+  OfferMadeMsgSchema,
+  OfferResponseMsgSchema,
   JobSubmittedMsgSchema,
   JobReviewedMsgSchema,
   JobCompletedMsgSchema,
@@ -208,6 +274,8 @@ export const AgentToServerMsgSchema = z.discriminatedUnion('type', [
   PostJobMsgSchema,
   BidMsgSchema,
   AwardMsgSchema,
+  CounterOfferMsgSchema,
+  OfferDecisionMsgSchema,
   SubmitMsgSchema,
   ReviewMsgSchema,
 ]);

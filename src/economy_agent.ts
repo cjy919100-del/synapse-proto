@@ -11,6 +11,8 @@ import {
   type JobPostedMsg,
   type JobReviewedMsg,
   type JobSubmittedMsg,
+  type OfferMadeMsg,
+  type OfferResponseMsg,
   ServerToAgentMsgSchema,
 } from './protocol.js';
 
@@ -114,6 +116,10 @@ export class EconomyAgent {
         return this.onJobSubmitted(msg);
       case 'job_reviewed':
         return this.onJobReviewed(msg);
+      case 'offer_made':
+        return this.onOfferMade(msg);
+      case 'offer_response':
+        return this.onOfferResponse(msg);
       default:
         return;
     }
@@ -198,7 +204,8 @@ export class EconomyAgent {
     );
     const etaSeconds = this.persona.worker === 'sprinter' ? randInt(1, 4) : randInt(2, 10);
     const pitch = this.makePitch(job, price, etaSeconds);
-    const bid: AgentToServerMsg = { v: PROTOCOL_VERSION, type: 'bid', jobId: job.id, price, etaSeconds, pitch };
+    const terms = this.makeTermsFor(job, price, etaSeconds);
+    const bid: AgentToServerMsg = { v: PROTOCOL_VERSION, type: 'bid', jobId: job.id, price, etaSeconds, pitch, terms };
     this.send(bid);
   }
 
@@ -227,6 +234,18 @@ export class EconomyAgent {
     }
   }
 
+  private makeTermsFor(job: Job, price: number, etaSeconds: number) {
+    // Keep it simple/visible: some workers ask for upfront + limited revisions, others are flexible.
+    const upfrontPct = (() => {
+      if (this.persona.worker === 'premium') return 0.25;
+      if (this.persona.worker === 'undercutter') return 0;
+      return Math.random() < 0.25 ? 0.1 : 0;
+    })();
+    const deadlineSeconds = Math.max(etaSeconds * 2, Math.min(20, (job.payload as any)?.timeoutSeconds ?? 12));
+    const maxRevisions = this.persona.worker === 'premium' ? 2 : this.persona.worker === 'sprinter' ? 0 : 1;
+    return { upfrontPct, deadlineSeconds, maxRevisions };
+  }
+
   private async pickWinnerAndAward(jobId: string) {
     if (!this.agentId) return;
     const job = this.openJobs.get(jobId);
@@ -251,14 +270,26 @@ export class EconomyAgent {
     bids.sort((a, b) => utility(b) - utility(a));
     const winner = bids[0]!;
 
-    const award: AgentToServerMsg = {
+    // Negotiate before awarding: boss proposes terms based on personality.
+    const baseTerms = { upfrontPct: 0, deadlineSeconds: Math.max(6, winner.etaSeconds * 3), maxRevisions: 1 };
+    const terms =
+      this.persona.boss === 'risk_averse'
+        ? { ...baseTerms, upfrontPct: 0, maxRevisions: 0 }
+        : this.persona.boss === 'cost_cutter'
+          ? { ...baseTerms, upfrontPct: 0, maxRevisions: 1 }
+          : this.persona.boss === 'speed_runner'
+            ? { ...baseTerms, deadlineSeconds: Math.max(4, winner.etaSeconds * 2), maxRevisions: 0 }
+            : { ...baseTerms, upfrontPct: 0.1, maxRevisions: 1 };
+
+    const offer: AgentToServerMsg = {
       v: PROTOCOL_VERSION,
-      type: 'award',
+      type: 'counter_offer',
       jobId,
       workerId: winner.bidderId,
-      notes: `boss=${this.persona.boss} picked rep=${winner.score.toFixed(2)} price=${winner.price} eta=${winner.etaSeconds}`,
+      terms,
+      notes: `boss=${this.persona.boss} counter_terms upfront=${Math.round(terms.upfrontPct * 100)}% deadline=${terms.deadlineSeconds}s rev=${terms.maxRevisions}`,
     };
-    this.send(award);
+    this.send(offer);
 
     // This job is no longer open (server will broadcast award), but we can optimistically stop posting duplicates.
     this.ownedOpenJobs.delete(jobId);
@@ -280,6 +311,33 @@ export class EconomyAgent {
       const submit: AgentToServerMsg = { v: PROTOCOL_VERSION, type: 'submit', jobId: msg.jobId, result };
       this.send(submit);
     }, randInt(800, 1_800));
+  }
+
+  private onOfferMade(msg: OfferMadeMsg) {
+    if (!this.agentId) return;
+    if (msg.workerId !== this.agentId) return;
+
+    // Worker decides based on personality: premium likes upfront; undercutter dislikes revisions; sprinter dislikes long deadline.
+    const t = msg.terms;
+    let accept = true;
+    if (this.persona.worker === 'undercutter' && t.upfrontPct > 0) accept = false;
+    if (this.persona.worker === 'sprinter' && t.deadlineSeconds > 12) accept = false;
+    if (this.persona.worker === 'premium' && t.upfrontPct < 0.1) accept = Math.random() < 0.65;
+    if (this.persona.worker === 'selective' && t.maxRevisions > 1) accept = false;
+
+    const decision: AgentToServerMsg = {
+      v: PROTOCOL_VERSION,
+      type: 'offer_decision',
+      jobId: msg.jobId,
+      requesterId: msg.requesterId,
+      decision: accept ? 'accept' : 'reject',
+      notes: `worker=${this.persona.worker}`,
+    };
+    setTimeout(() => this.send(decision), randInt(300, 900));
+  }
+
+  private onOfferResponse(_msg: OfferResponseMsg) {
+    // Spectator value only; we don't need to react here.
   }
 
   private onJobSubmitted(msg: JobSubmittedMsg) {
