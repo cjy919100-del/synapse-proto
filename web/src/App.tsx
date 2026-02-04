@@ -328,6 +328,15 @@ export default function App() {
   } satisfies State);
 
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const deepLinkJobId = useMemo(() => {
+    try {
+      const u = new URL(window.location.href);
+      const v = u.searchParams.get('job');
+      return v && v.trim().length > 0 ? v.trim() : null;
+    } catch {
+      return null;
+    }
+  }, []);
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<number | null>(null);
@@ -396,6 +405,12 @@ export default function App() {
       .sort((a, b) => b.atMs - a.atMs)
       .slice(0, 80);
   }, [selectedJobId, state.evidence]);
+
+  useEffect(() => {
+    if (!deepLinkJobId) return;
+    if (selectedJobId) return;
+    if (state.jobs[deepLinkJobId]) setSelectedJobId(deepLinkJobId);
+  }, [deepLinkJobId, selectedJobId, state.jobs]);
 
   return (
     <div className="min-h-screen">
