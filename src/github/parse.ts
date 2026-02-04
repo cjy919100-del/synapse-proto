@@ -43,3 +43,18 @@ export function parseSynapseJobRefFromText(text: string | null | undefined): num
   return Math.floor(n);
 }
 
+export function extractFencedDiff(text: string | null | undefined): string | null {
+  if (!text) return null;
+  // Look for ```diff fenced blocks first; fallback to any ``` block that starts with diff headers.
+  const blocks = Array.from(text.matchAll(/```(\w+)?\n([\s\S]*?)\n```/g));
+  for (const b of blocks) {
+    const lang = (b[1] ?? '').toLowerCase();
+    const body = b[2] ?? '';
+    if (lang === 'diff') return body.trim();
+  }
+  for (const b of blocks) {
+    const body = (b[2] ?? '').trim();
+    if (body.startsWith('diff --git ') || body.startsWith('--- ') || body.startsWith('*** ')) return body;
+  }
+  return null;
+}

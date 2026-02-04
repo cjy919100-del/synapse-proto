@@ -18,7 +18,8 @@
     "format": "prettier --write .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "verify:coding": "tsx scripts/verify-coding.ts"
+    "verify:coding": "tsx scripts/verify-coding.ts",
+    "gh:bot": "tsx scripts/gh-bot.ts"
   },
   "dependencies": {
     "clsx": "^2.1.1",

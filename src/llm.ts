@@ -55,6 +55,38 @@ Do NOT include example usage or tests in the output.
         }
     }
 
+    async solveRepoPatchTask(args: { repo: string; issue: string; contextHint?: string }): Promise<string> {
+        if (process.env.FORCE_MOCK_LLM === 'true' || !this.openai) {
+            console.error('[llm] repo-patch unavailable (forced or no key)');
+            throw new Error('llm_disabled');
+        }
+
+        const prompt = `
+You are an expert software engineer.
+
+Return ONLY a unified diff patch that can be applied with \`git apply\`.
+Do not include explanations, markdown fences, or any extra text.
+
+Repo: ${args.repo}
+
+Issue:
+${args.issue}
+
+${args.contextHint ? `Context hint (truncated):\n${args.contextHint}\n` : ''}
+        `.trim();
+
+        const completion = await this.openai.chat.completions.create({
+            model: 'gpt-4o-mini',
+            messages: [{ role: 'user', content: prompt }],
+            temperature: 0.1,
+        });
+
+        let patch = completion.choices[0]?.message?.content || '';
+        // Strip accidental fences if the model ignored instructions.
+        patch = patch.replace(/^```diff\n/, '').replace(/^```\n/, '').replace(/\n```$/, '');
+        return patch.trim();
+    }
+
     // Fallback for when no API key is set
     solveMock(task: CodingTaskPayload): string {
         // Hardcoded logic for valid demo scenarios

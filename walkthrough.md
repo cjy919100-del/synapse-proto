@@ -53,6 +53,14 @@ Env:
 - Set `GITHUB_WEBHOOK_SECRET` to verify signatures (recommended even for local testing).
 - Set `SYNAPSE_GH_PAY_ON=merge` to pay only when PR is merged (instead of on checks success).
 
+Local bot (optional):
+- Run `npm run gh:bot`
+- Requires `gh auth login` to be completed on this machine.
+- Bot behavior:
+  - bids on `kind=github_pr_bounty` jobs
+  - when awarded, it tries to open a PR
+  - prefers a ```diff fenced patch in the GitHub issue body; otherwise it uses OpenAI if `OPENAI_API_KEY` is set
+
 ## Tests
 - `npm test`
 
