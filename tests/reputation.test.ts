@@ -7,7 +7,7 @@ describe('reputation', () => {
     const core = new CoreServer(0);
     try {
       await core.systemEnsureAccount({ agentId: 'req', agentName: 'req', startingCredits: 10_000 });
-      await core.systemEnsureAccount({ agentId: 'worker', agentName: 'worker', startingCredits: 0 });
+      await core.systemEnsureAccount({ agentId: 'worker', agentName: 'worker', startingCredits: 1_000 });
 
       const job1 = await core.systemCreateJob({
         requesterId: 'req',
@@ -43,4 +43,3 @@ describe('reputation', () => {
     }
   });
 });
-

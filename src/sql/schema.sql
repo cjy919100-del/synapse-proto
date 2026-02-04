@@ -31,6 +31,17 @@ create table if not exists reputation (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists job_evidence (
+  id bigserial primary key,
+  job_id uuid not null references jobs(job_id) on delete cascade,
+  kind text not null,
+  payload jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists job_evidence_job_id_idx on job_evidence(job_id);
+create index if not exists job_evidence_created_at_idx on job_evidence(created_at desc);
+
 create table if not exists jobs (
   job_id uuid primary key,
   title text not null,

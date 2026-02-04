@@ -51,11 +51,21 @@ type JobState = Job & {
 };
 
 const DEFAULT_STARTING_CREDITS = 1_000;
+const DEFAULT_WORKER_STAKE_PCT = 0.05;
+const DEFAULT_WORKER_SLASH_PCT = 0.5;
+
+function parsePctEnv(name: string, fallback: number): number {
+  const v = process.env[name];
+  if (!v) return fallback;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 && n <= 1 ? n : fallback;
+}
 
 type TapeEvent =
   | { type: 'agent_authed'; agentId: string; agentName: string; credits: number }
   | { type: 'ledger_update'; agentId: string; credits: number; locked: number }
   | { type: 'rep_update'; agentId: string; completed: number; failed: number; score: number }
+  | { type: 'evidence'; jobId: string; kind: string; detail: string }
   | { type: 'broadcast'; msg: ServerToAgentMsg };
 
 export type ObserverSnapshot = {
@@ -257,6 +267,35 @@ export class CoreServer extends EventEmitter {
     }
   }
 
+  private workerStakeForJob(job: JobState): number {
+    const pct = parsePctEnv('SYNAPSE_WORKER_STAKE_PCT', DEFAULT_WORKER_STAKE_PCT);
+    const raw = Math.floor(job.budget * pct);
+    // Keep stake small for MVP, but non-zero.
+    return Math.max(0, Math.min(200, raw));
+  }
+
+  private slashForStake(stake: number): number {
+    const pct = parsePctEnv('SYNAPSE_WORKER_SLASH_PCT', DEFAULT_WORKER_SLASH_PCT);
+    return Math.max(0, Math.min(stake, Math.ceil(stake * pct)));
+  }
+
+  private async addEvidence(args: { jobId: string; kind: string; detail: string; payload?: unknown }) {
+    const evt: TapeEvent = { type: 'evidence', jobId: args.jobId, kind: args.kind, detail: args.detail };
+    this.emit('tape', evt);
+    if (this.db) {
+      try {
+        await this.db.insertJobEvidence({ jobId: args.jobId, kind: args.kind, payload: args.payload ?? {} });
+        void this.db.insertEvent({ kind: 'evidence', payload: evt });
+      } catch (err) {
+        this.log(`[server] db_error_evidence: ${(err as Error).message}`);
+      }
+    }
+  }
+
+  async systemAddEvidence(args: { jobId: string; kind: string; detail: string; payload?: unknown }) {
+    await this.addEvidence(args);
+  }
+
   async systemEnsureAccount(args: {
     agentId: string;
     agentName: string;
@@ -339,10 +378,17 @@ export class CoreServer extends EventEmitter {
     if (!acct) throw new Error('no_ledger_account');
     if (acct.credits - acct.locked < job.budget) throw new Error('insufficient_credits');
 
+    const workerAcct = this.ledger.get(args.workerId);
+    if (!workerAcct) throw new Error('worker_no_ledger_account');
+
+    const stake = this.workerStakeForJob(job);
+    if (stake > 0 && workerAcct.credits - workerAcct.locked < stake) throw new Error('worker_insufficient_stake');
+
     acct.locked += job.budget;
     job.lockedBudget = job.budget;
     job.status = 'awarded';
     job.workerId = args.workerId;
+    if (stake > 0) workerAcct.locked += stake;
 
     const out: JobAwardedMsg = {
       v: PROTOCOL_VERSION,
@@ -353,9 +399,13 @@ export class CoreServer extends EventEmitter {
     };
     this.broadcast(out);
 
+    if (stake > 0) this.sendLedgerUpdate(args.workerId);
     if (this.db) {
       await this.db.updateJob(job);
       await this.db.upsertLedger({ agentId: job.requesterId, credits: acct.credits, locked: acct.locked });
+      if (stake > 0) {
+        await this.db.upsertLedger({ agentId: args.workerId, credits: workerAcct.credits, locked: workerAcct.locked });
+      }
       void this.db.insertEvent({ kind: 'job_awarded', payload: out });
     }
   }
@@ -363,7 +413,7 @@ export class CoreServer extends EventEmitter {
   async systemReopenJob(args: { jobId: string }): Promise<void> {
     const job = this.jobs.get(args.jobId);
     if (!job) throw new Error('job_not_found');
-    if (job.status !== 'awarded') return;
+    if (job.status !== 'awarded' && job.status !== 'failed') return;
 
     const requesterAcct = this.ledger.get(job.requesterId);
     if (requesterAcct) requesterAcct.locked -= job.lockedBudget;
@@ -421,6 +471,12 @@ export class CoreServer extends EventEmitter {
     workerAcct.credits += job.lockedBudget;
     this.bumpReputation(args.workerId, 'completed');
 
+    const stake = this.workerStakeForJob(job);
+    if (stake > 0) {
+      workerAcct.locked -= stake;
+      this.sendLedgerUpdate(args.workerId);
+    }
+
     const completed: JobCompletedMsg = {
       v: PROTOCOL_VERSION,
       type: 'job_completed',
@@ -458,6 +514,17 @@ export class CoreServer extends EventEmitter {
     const requesterAcct = this.ledger.get(job.requesterId);
     if (requesterAcct) requesterAcct.locked -= job.lockedBudget;
 
+    const workerAcct = this.ledger.get(args.workerId);
+    const stake = this.workerStakeForJob(job);
+    if (workerAcct && stake > 0) {
+      const slash = this.slashForStake(stake);
+      workerAcct.locked -= stake;
+      workerAcct.credits -= slash;
+      if (requesterAcct) requesterAcct.credits += slash;
+      this.sendLedgerUpdate(args.workerId);
+      if (requesterAcct) this.sendLedgerUpdate(job.requesterId);
+    }
+
     const failedMsg: JobFailedMsg = {
       v: PROTOCOL_VERSION,
       type: 'job_failed',
@@ -487,7 +554,15 @@ export class CoreServer extends EventEmitter {
     if (this.db) await this.db.upsertGithubIssueJobLink({ ...args, issueNumber: Math.floor(args.issueNumber) });
   }
 
-  async systemLinkGithubPr(args: { owner: string; repo: string; prNumber: number; jobId: string; headSha?: string }) {
+  async systemLinkGithubPr(args: {
+    owner: string;
+    repo: string;
+    prNumber: number;
+    jobId: string;
+    headSha?: string;
+    authorLogin?: string;
+    merged?: boolean;
+  }) {
     const key = `${args.owner}/${args.repo}#${Math.floor(args.prNumber)}`;
     this.githubPrToJobId.set(key, args.jobId);
     if (this.db) {
@@ -497,6 +572,8 @@ export class CoreServer extends EventEmitter {
         prNumber: Math.floor(args.prNumber),
         jobId: args.jobId,
         headSha: args.headSha ?? null,
+        authorLogin: args.authorLogin ?? null,
+        merged: args.merged,
       });
     }
   }
@@ -595,10 +672,16 @@ export class CoreServer extends EventEmitter {
     if (!acct) return this.fail(session.ws, 'no_ledger_account');
     if (acct.credits - acct.locked < job.budget) return this.fail(session.ws, 'insufficient_credits');
 
+    const workerAcct = this.ledger.get(workerId);
+    if (!workerAcct) return this.fail(session.ws, 'worker_no_ledger_account');
+    const stake = this.workerStakeForJob(job);
+    if (stake > 0 && workerAcct.credits - workerAcct.locked < stake) return this.fail(session.ws, 'worker_insufficient_stake');
+
     acct.locked += job.budget;
     job.lockedBudget = job.budget;
     job.status = 'awarded';
     job.workerId = workerId;
+    if (stake > 0) workerAcct.locked += stake;
 
     const out: JobAwardedMsg = {
       v: PROTOCOL_VERSION,
@@ -608,11 +691,13 @@ export class CoreServer extends EventEmitter {
       budgetLocked: job.budget,
     };
     this.broadcast(out);
+    if (stake > 0) this.sendLedgerUpdate(workerId);
 
     if (this.db) {
       try {
         await this.db.updateJob(job);
         await this.db.upsertLedger({ agentId: requesterId, credits: acct.credits, locked: acct.locked });
+        if (stake > 0) await this.db.upsertLedger({ agentId: workerId, credits: workerAcct.credits, locked: workerAcct.locked });
         void this.db.insertEvent({ kind: 'job_awarded', payload: out });
       } catch (err) {
         this.log(`[server] db_error_job_awarded: ${(err as Error).message}`);
@@ -658,6 +743,17 @@ export class CoreServer extends EventEmitter {
           // Actually, locked means "reserved but still in credits". So reducing locked is enough to free it up.
         }
 
+        const workerAcct = this.ledger.get(workerId);
+        const stake = this.workerStakeForJob(job);
+        if (workerAcct && stake > 0) {
+          const slash = this.slashForStake(stake);
+          workerAcct.locked -= stake;
+          workerAcct.credits -= slash;
+          if (requesterAcct) requesterAcct.credits += slash;
+          this.sendLedgerUpdate(workerId);
+          if (requesterAcct) this.sendLedgerUpdate(job.requesterId);
+        }
+
         const failedMsg: JobFailedMsg = {
           v: PROTOCOL_VERSION,
           type: 'job_failed',
@@ -694,6 +790,12 @@ export class CoreServer extends EventEmitter {
     requesterAcct.credits -= job.lockedBudget;
     workerAcct.credits += job.lockedBudget;
     this.bumpReputation(workerId, 'completed');
+
+    const stake = this.workerStakeForJob(job);
+    if (stake > 0) {
+      workerAcct.locked -= stake;
+      this.sendLedgerUpdate(workerId);
+    }
 
     const completed: JobCompletedMsg = {
       v: PROTOCOL_VERSION,

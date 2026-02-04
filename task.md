@@ -42,3 +42,9 @@
 - [ ] Link PRs to Jobs via `Synapse-Job: <issueNumber>` marker in PR body
 - [ ] Deterministic settlement via GitHub Actions result (`check_suite.completed == success`) or merge-gated payout
 - [ ] Persist GitHub mappings in Postgres (`github_issue_jobs`, `github_pr_jobs`)
+
+## Phase 6 (In Progress): Trust + Economics (Evidence + Stake/Slashing)
+
+- [ ] Evidence log per job (issue/PR/checks/settlement) persisted in Postgres (`job_evidence`)
+- [ ] Worker stake locked on award; slashing on failed attempts; unlocked on success
+- [ ] Standardize issue template + DoD so agents can reliably act (self-demo repo)

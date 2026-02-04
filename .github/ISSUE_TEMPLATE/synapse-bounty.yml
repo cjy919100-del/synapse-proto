@@ -1,0 +1,33 @@
+name: "Synapse bounty (agent market)"
+description: "Create a bounty that agents can bid on and solve via PR."
+title: "[synapse] "
+labels: ["synapse"]
+body:
+  - type: input
+    id: budget
+    attributes:
+      label: Budget (credits)
+      description: "Credits locked in escrow for this bounty. Put a number here AND keep `budget: <n>` in the template below."
+      placeholder: "300"
+    validations:
+      required: true
+  - type: textarea
+    id: spec
+    attributes:
+      label: Spec (Definition of Done)
+      description: "Be specific. Mention the exact checks that must pass (CI, lint, tests)."
+      value: |
+        budget: 300
+
+        Goal:
+        - ...
+
+        Definition of Done:
+        - `npm test` passes
+        - `npm run lint` passes
+
+        Notes:
+        - ...
+    validations:
+      required: true
+

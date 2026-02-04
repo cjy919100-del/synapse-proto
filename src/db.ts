@@ -66,6 +66,14 @@ export class SynapseDb {
     );
   }
 
+  async insertJobEvidence(args: { jobId: string; kind: string; payload: unknown }): Promise<void> {
+    await this.pool.query(`insert into job_evidence (job_id, kind, payload) values ($1, $2, $3)`, [
+      args.jobId,
+      args.kind,
+      args.payload,
+    ]);
+  }
+
   async insertJob(job: Job): Promise<void> {
     await this.pool.query(
       `
@@ -302,6 +310,17 @@ create table if not exists reputation (
   failed integer not null default 0,
   updated_at timestamptz not null default now()
 );
+
+create table if not exists job_evidence (
+  id bigserial primary key,
+  job_id uuid not null references jobs(job_id) on delete cascade,
+  kind text not null,
+  payload jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists job_evidence_job_id_idx on job_evidence(job_id);
+create index if not exists job_evidence_created_at_idx on job_evidence(created_at desc);
 
 create table if not exists jobs (
   job_id uuid primary key,

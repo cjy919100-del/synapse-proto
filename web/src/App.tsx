@@ -39,6 +39,7 @@ type TapeEvent =
   | { type: 'agent_authed'; agentId: string; agentName: string; credits: number }
   | { type: 'ledger_update'; agentId: string; credits: number; locked: number }
   | { type: 'rep_update'; agentId: string; completed: number; failed: number; score: number }
+  | { type: 'evidence'; jobId: string; kind: string; detail: string }
   | { type: 'broadcast'; msg: unknown };
 
 type SpectatorMsg = { v: number; type: 'snapshot'; data: Snapshot } | { v: number; type: 'event'; data: TapeEvent };
@@ -48,7 +49,7 @@ type ConnectionStatus = 'connecting' | 'open' | 'closed';
 type TapeRow = {
   id: string;
   atMs: number;
-  kind: 'JOB' | 'BID' | 'AWARD' | 'DONE' | 'LEDGER' | 'AGENT' | 'REP' | 'OTHER';
+  kind: 'JOB' | 'BID' | 'AWARD' | 'DONE' | 'LEDGER' | 'AGENT' | 'REP' | 'EVD' | 'OTHER';
   detail: string;
 };
 
@@ -99,6 +100,8 @@ function badgeForKind(kind: TapeRow['kind']) {
       return { label: 'AGENT', variant: 'outline' as const };
     case 'REP':
       return { label: 'REP', variant: 'accent' as const };
+    case 'EVD':
+      return { label: 'EVD', variant: 'outline' as const };
     default:
       return { label: 'EVT', variant: 'outline' as const };
   }
@@ -212,6 +215,14 @@ function eventToTapeRow(evt: TapeEvent): TapeRow | null {
       atMs,
       kind: 'REP',
       detail: `rep ${shortId(evt.agentId)} -> ${pct}% (${evt.completed} ok / ${evt.failed} fail)`,
+    };
+  }
+  if (evt.type === 'evidence') {
+    return {
+      id: nowId(),
+      atMs,
+      kind: 'EVD',
+      detail: `evd job=${shortId(evt.jobId)} ${evt.kind} • ${evt.detail}`,
     };
   }
   if (evt.type === 'ledger_update') {

@@ -55,7 +55,8 @@ describe('GitHub PR-bounty bridge', () => {
       const requester = snap.agents.find((a) => a.agentId === 'ghrepo:cjy5507/demo')!;
       const worker = snap.agents.find((a) => a.agentId === 'gh:alice')!;
       expect(requester.locked).toBe(333);
-      expect(worker.credits).toBe(0);
+      expect(worker.credits).toBeGreaterThan(0); // bot faucet for stake
+      expect(worker.locked).toBeGreaterThan(0); // stake locked
 
       const checksPayload = {
         action: 'completed',
@@ -76,7 +77,8 @@ describe('GitHub PR-bounty bridge', () => {
       const worker2 = snap.agents.find((a) => a.agentId === 'gh:alice')!;
       expect(requester2.locked).toBe(0);
       expect(requester2.credits).toBe(1_000 - 333);
-      expect(worker2.credits).toBe(333);
+      expect(worker2.credits).toBeGreaterThanOrEqual(333);
+      expect(worker2.locked).toBe(0); // stake unlocked
     } finally {
       await core.close();
     }
