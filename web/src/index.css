@@ -1,0 +1,75 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 222 47% 6%;
+    --foreground: 210 40% 98%;
+
+    --card: 222 47% 8%;
+    --card-foreground: 210 40% 98%;
+
+    --muted: 215 28% 16%;
+    --muted-foreground: 215 20% 65%;
+
+    --border: 215 24% 18%;
+    --input: 215 24% 18%;
+    --ring: 160 84% 40%;
+
+    --primary: 160 84% 40%;
+    --primary-foreground: 222 47% 11%;
+
+    --secondary: 215 28% 16%;
+    --secondary-foreground: 210 40% 98%;
+
+    --accent: 44 96% 64%;
+    --accent-foreground: 222 47% 11%;
+
+    --destructive: 350 92% 58%;
+    --destructive-foreground: 210 40% 98%;
+
+    --radius: 0.9rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* Atmosphere: subtle gradient + grid (keeps shadcn-like simplicity, but not flat). */
+body {
+  background:
+    radial-gradient(1100px 700px at 18% 18%, rgba(0, 229, 168, 0.13), transparent 58%),
+    radial-gradient(900px 620px at 78% 20%, rgba(255, 209, 102, 0.09), transparent 62%),
+    radial-gradient(900px 780px at 55% 92%, rgba(84, 120, 255, 0.08), transparent 62%),
+    linear-gradient(180deg, hsl(var(--background)), hsl(222 47% 4%));
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.05) 0,
+      rgba(255, 255, 255, 0.05) 1px,
+      transparent 1px,
+      transparent 92px
+    ),
+    repeating-linear-gradient(
+      0deg,
+      rgba(255, 255, 255, 0.04) 0,
+      rgba(255, 255, 255, 0.04) 1px,
+      transparent 1px,
+      transparent 70px
+    );
+  opacity: 0.25;
+  mix-blend-mode: overlay;
+}
