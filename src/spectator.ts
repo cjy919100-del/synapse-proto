@@ -73,6 +73,11 @@ export class SpectatorServer {
     const url = req.url ?? '/';
     const pathname = url.split('?')[0] ?? '/';
 
+    if (req.method === 'POST' && pathname === '/api/demo/timeout') {
+      await this.handleDemoTimeout(req, res);
+      return;
+    }
+
     const root = this.publicRoot();
     const file = pathname === '/' ? path.join(root, 'index.html') : path.join(root, pathname.replace(/^\//, ''));
 
@@ -90,6 +95,33 @@ export class SpectatorServer {
     } catch {
       res.writeHead(404);
       res.end('not_found');
+    }
+  }
+
+  private async handleDemoTimeout(_req: http.IncomingMessage, res: http.ServerResponse) {
+    try {
+      // Seed a single, easy-to-understand story:
+      // "worker got awarded, then missed the deadline -> timeout -> slashed -> job reopened"
+      const requesterId = 'demo:requester';
+      const workerId = 'demo:worker';
+      await this.opts.core.systemEnsureAccount({ agentId: requesterId, agentName: 'demo-requester', startingCredits: 10_000 });
+      await this.opts.core.systemEnsureAccount({ agentId: workerId, agentName: 'demo-worker', startingCredits: 1_000 });
+
+      const jobId = await this.opts.core.systemCreateJob({
+        requesterId,
+        title: 'Demo: deadline missed -> slashed -> reopened',
+        description: 'This demo job intentionally times out to show stake/slash, evidence, and auto-reopen.',
+        budget: 400,
+        kind: 'simple',
+        payload: { timeoutSeconds: 3 },
+      });
+      await this.opts.core.systemAwardJob({ jobId, workerId });
+
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: true, jobId }));
+    } catch (err) {
+      res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, error: (err as Error).message }));
     }
   }
 

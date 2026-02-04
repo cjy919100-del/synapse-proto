@@ -220,7 +220,7 @@ function eventToTapeRow(evt: TapeEvent): TapeRow | null {
       id: nowId(),
       atMs,
       kind: 'AGENT',
-      detail: `${evt.agentName} authed • credits=${evt.credits} • id=${shortId(evt.agentId)}`,
+      detail: `Agent joined: ${evt.agentName} (wallet=${evt.credits})`,
     };
   }
   if (evt.type === 'rep_update') {
@@ -229,7 +229,7 @@ function eventToTapeRow(evt: TapeEvent): TapeRow | null {
       id: nowId(),
       atMs,
       kind: 'REP',
-      detail: `rep ${shortId(evt.agentId)} -> ${pct}% (${evt.completed} ok / ${evt.failed} fail)`,
+      detail: `Reputation: ${shortId(evt.agentId)} -> ${pct}% (${evt.completed} ok / ${evt.failed} fail)`,
     };
   }
   if (evt.type === 'evidence') {
@@ -237,7 +237,7 @@ function eventToTapeRow(evt: TapeEvent): TapeRow | null {
       id: nowId(),
       atMs,
       kind: 'EVD',
-      detail: `evd job=${shortId(evt.jobId)} ${evt.kind} • ${evt.detail}`,
+      detail: `Evidence: job=${shortId(evt.jobId)} ${evt.kind} • ${evt.detail}`,
     };
   }
   if (evt.type === 'ledger_update') {
@@ -245,7 +245,7 @@ function eventToTapeRow(evt: TapeEvent): TapeRow | null {
       id: nowId(),
       atMs,
       kind: 'LEDGER',
-      detail: `wallet ${shortId(evt.agentId)} credits=${evt.credits} locked=${evt.locked}`,
+      detail: `Wallet: ${shortId(evt.agentId)} spendable=${evt.credits - evt.locked} locked=${evt.locked}`,
     };
   }
   if (evt.type === 'broadcast') {
@@ -260,7 +260,7 @@ function eventToTapeRow(evt: TapeEvent): TapeRow | null {
         id: nowId(),
         atMs,
         kind: 'JOB',
-        detail: `job_posted "${job.title ?? '?'}" • budget=${job.budget ?? '?'} • req=${shortId(job.requesterId)}`,
+        detail: `New contract: "${job.title ?? '?'}" (budget=${job.budget ?? '?'})`,
       };
     }
     if (t === 'bid_posted' && isObject(msg.bid)) {
@@ -269,7 +269,7 @@ function eventToTapeRow(evt: TapeEvent): TapeRow | null {
         id: nowId(),
         atMs,
         kind: 'BID',
-        detail: `bid job=${shortId(bid.jobId)} price=${bid.price ?? '?'} bidder=${shortId(bid.bidderId)}`,
+        detail: `Bid: job=${shortId(bid.jobId)} price=${bid.price ?? '?'} by ${shortId(bid.bidderId)}`,
       };
     }
     if (t === 'job_awarded') {
@@ -277,7 +277,7 @@ function eventToTapeRow(evt: TapeEvent): TapeRow | null {
         id: nowId(),
         atMs,
         kind: 'AWARD',
-        detail: `awarded job=${shortId(String(msg.jobId ?? ''))} -> worker=${shortId(String(msg.workerId ?? ''))} lock=${msg.budgetLocked ?? '?'}`,
+        detail: `Awarded: job=${shortId(String(msg.jobId ?? ''))} -> worker ${shortId(String(msg.workerId ?? ''))} (escrow=${msg.budgetLocked ?? '?'})`,
       };
     }
     if (t === 'job_completed') {
@@ -285,7 +285,15 @@ function eventToTapeRow(evt: TapeEvent): TapeRow | null {
         id: nowId(),
         atMs,
         kind: 'DONE',
-        detail: `completed job=${shortId(String(msg.jobId ?? ''))} paid=${msg.paid ?? '?'}`,
+        detail: `Settled (success): job=${shortId(String(msg.jobId ?? ''))} paid=${msg.paid ?? '?'}`,
+      };
+    }
+    if (t === 'job_failed') {
+      return {
+        id: nowId(),
+        atMs,
+        kind: 'DONE',
+        detail: `Settled (failed): job=${shortId(String((msg as any).jobId ?? ''))} reason=${String((msg as any).reason ?? '?')}`,
       };
     }
     return { id: nowId(), atMs, kind: 'OTHER', detail: t };
@@ -397,6 +405,8 @@ export default function App() {
   }, [state.bids]);
 
   const openJobs = jobsSorted.filter((j) => j.status === 'open').length;
+  const awardedJobs = jobsSorted.filter((j) => j.status === 'awarded').length;
+  const completedJobs = jobsSorted.filter((j) => j.status === 'completed').length;
   const selectedJob = selectedJobId ? state.jobs[selectedJobId] : null;
   const selectedEvidence = useMemo(() => {
     if (!selectedJobId) return [];
@@ -412,6 +422,22 @@ export default function App() {
     if (state.jobs[deepLinkJobId]) setSelectedJobId(deepLinkJobId);
   }, [deepLinkJobId, selectedJobId, state.jobs]);
 
+  const runDemo = async () => {
+    try {
+      const res = await fetch('/api/demo/timeout', { method: 'POST' });
+      const json = (await res.json()) as { ok: boolean; jobId?: string; error?: string };
+      if (!json.ok || !json.jobId) throw new Error(json.error ?? 'demo_failed');
+      const url = new URL(window.location.href);
+      url.searchParams.set('job', json.jobId);
+      window.history.replaceState(null, '', url.toString());
+      setSelectedJobId(json.jobId);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(err);
+      alert('Demo failed. Check the server logs.');
+    }
+  };
+
   return (
     <div className="min-h-screen">
       <header className="relative z-10 border-b bg-background/70 backdrop-blur-md">
@@ -420,7 +446,7 @@ export default function App() {
             <div className="h-10 w-10 rounded-2xl bg-gradient-to-br from-primary to-accent shadow-[0_18px_60px_rgba(0,229,168,0.18)]" />
             <div className="leading-tight">
               <div className="text-[13px] font-semibold tracking-[0.22em]">SYNAPSE</div>
-              <div className="text-xs font-mono text-muted-foreground">Spectator Mode</div>
+              <div className="text-xs font-mono text-muted-foreground">AI-to-AI Market (Live)</div>
             </div>
           </div>
 
@@ -441,15 +467,41 @@ export default function App() {
               <div className="text-[11px] font-mono text-muted-foreground">{state.wsUrl}</div>
             </div>
           </div>
+
+          <button
+            onClick={runDemo}
+            className="rounded-full border bg-primary text-primary-foreground px-4 py-2 text-xs font-semibold shadow-[0_18px_60px_rgba(0,229,168,0.16)] hover:brightness-95"
+          >
+            Run demo
+          </button>
         </div>
       </header>
 
       <main className="relative z-0 mx-auto max-w-7xl px-4 py-4">
+        <div className="mb-4 grid gap-3 lg:grid-cols-12">
+          <Card className="lg:col-span-8">
+            <CardHeader>
+              <CardTitle className="text-sm">What you are watching</CardTitle>
+              <CardDescription className="text-xs">
+                Contracts are posted, agents bid, one gets awarded, and settlement happens after verification (or timeout/failure).
+                Click a contract to see its evidence timeline.
+              </CardDescription>
+            </CardHeader>
+          </Card>
+          <Card className="lg:col-span-4">
+            <CardHeader>
+              <CardTitle className="text-sm">Market state</CardTitle>
+              <CardDescription className="text-xs font-mono">
+                open={openJobs} · awarded={awardedJobs} · done={completedJobs} · agents={agentsSorted.length}
+              </CardDescription>
+            </CardHeader>
+          </Card>
+        </div>
         <div className="grid gap-4 lg:grid-cols-12">
           <Card className="lg:col-span-5">
             <CardHeader>
               <div className="flex items-baseline justify-between gap-3">
-                <CardTitle>Market Tape</CardTitle>
+                <CardTitle>Live Activity</CardTitle>
                 <CardDescription>{state.totalEvents} events</CardDescription>
               </div>
             </CardHeader>
@@ -536,7 +588,7 @@ export default function App() {
           <Card className="lg:col-span-3">
             <CardHeader>
               <div className="flex items-baseline justify-between gap-3">
-                <CardTitle>Agents</CardTitle>
+                <CardTitle>Agents (Wallet + Reputation)</CardTitle>
                 <CardDescription>{agentsSorted.length} connected</CardDescription>
               </div>
             </CardHeader>
