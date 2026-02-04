@@ -27,6 +27,14 @@ type EconomyAgentConfig = {
 
 type BidLite = { bidderId: string; price: number; etaSeconds: number; score: number };
 
+type BossPersonality = 'risk_averse' | 'cost_cutter' | 'speed_runner' | 'balanced';
+type WorkerPersonality = 'undercutter' | 'premium' | 'sprinter' | 'selective' | 'balanced';
+
+type Personality = {
+  boss: BossPersonality;
+  worker: WorkerPersonality;
+};
+
 function randInt(min: number, max: number): number {
   return Math.floor(min + Math.random() * (max - min + 1));
 }
@@ -54,6 +62,10 @@ export class EconomyAgent {
   private readonly assignedJobs = new Set<string>();
 
   private postTimer: NodeJS.Timeout | null = null;
+  private readonly persona: Personality = {
+    boss: (['risk_averse', 'cost_cutter', 'speed_runner', 'balanced'] as const)[randInt(0, 3)]!,
+    worker: (['undercutter', 'premium', 'sprinter', 'selective', 'balanced'] as const)[randInt(0, 4)]!,
+  };
 
   constructor(readonly cfg: EconomyAgentConfig) {
     this.ws = new WebSocket(cfg.url);
@@ -172,11 +184,21 @@ export class EconomyAgent {
     if (spendable(this.credits, this.locked) < 50) return;
 
     // Bid on a subset to avoid everyone bidding on everything.
-    if (Math.random() < 0.35) return;
+    if (this.persona.worker === 'selective' && job.budget < 350) return;
+    if (Math.random() < 0.25) return;
 
-    const price = Math.max(10, Math.min(job.budget, randInt(Math.floor(job.budget * 0.35), Math.floor(job.budget * 0.8))));
-    const etaSeconds = randInt(2, 8);
-    const bid: AgentToServerMsg = { v: PROTOCOL_VERSION, type: 'bid', jobId: job.id, price, etaSeconds };
+    const [minP, maxP] = (() => {
+      if (this.persona.worker === 'undercutter') return [0.2, 0.5] as const;
+      if (this.persona.worker === 'premium') return [0.7, 0.95] as const;
+      return [0.35, 0.8] as const;
+    })();
+    const price = Math.max(
+      10,
+      Math.min(job.budget, randInt(Math.floor(job.budget * minP), Math.floor(job.budget * maxP))),
+    );
+    const etaSeconds = this.persona.worker === 'sprinter' ? randInt(1, 4) : randInt(2, 10);
+    const pitch = this.makePitch(job, price, etaSeconds);
+    const bid: AgentToServerMsg = { v: PROTOCOL_VERSION, type: 'bid', jobId: job.id, price, etaSeconds, pitch };
     this.send(bid);
   }
 
@@ -214,11 +236,28 @@ export class EconomyAgent {
     const bids = this.bidsByJobId.get(jobId) ?? [];
     if (bids.length === 0) return;
 
-    // Strategy: higher rep first, then cheaper, then faster.
-    bids.sort((a, b) => b.score - a.score || a.price - b.price || a.etaSeconds - b.etaSeconds);
+    // Personality-driven utility.
+    const utility = (b: BidLite) => {
+      const rep = b.score;
+      const price = b.price;
+      const eta = b.etaSeconds;
+
+      if (this.persona.boss === 'risk_averse') return rep * 100 - price * 0.4 - eta * 1.2;
+      if (this.persona.boss === 'cost_cutter') return rep * 40 - price * 1.2 - eta * 0.6;
+      if (this.persona.boss === 'speed_runner') return rep * 40 - price * 0.5 - eta * 2.0;
+      return rep * 60 - price * 0.7 - eta * 0.9; // balanced
+    };
+
+    bids.sort((a, b) => utility(b) - utility(a));
     const winner = bids[0]!;
 
-    const award: AgentToServerMsg = { v: PROTOCOL_VERSION, type: 'award', jobId, workerId: winner.bidderId };
+    const award: AgentToServerMsg = {
+      v: PROTOCOL_VERSION,
+      type: 'award',
+      jobId,
+      workerId: winner.bidderId,
+      notes: `boss=${this.persona.boss} picked rep=${winner.score.toFixed(2)} price=${winner.price} eta=${winner.etaSeconds}`,
+    };
     this.send(award);
 
     // This job is no longer open (server will broadcast award), but we can optimistically stop posting duplicates.
@@ -257,7 +296,7 @@ export class EconomyAgent {
       let decision: 'accept' | 'reject' | 'changes' = 'accept';
       let notes = '';
       if (!hasKw) {
-        decision = Math.random() < 0.6 ? 'changes' : 'reject';
+        decision = this.persona.boss === 'risk_averse' ? 'reject' : Math.random() < 0.75 ? 'changes' : 'reject';
         notes = `missing_keyword:${kw}`;
       } else {
         notes = 'ok';
@@ -286,9 +325,18 @@ export class EconomyAgent {
     this.ws.send(JSON.stringify(msg));
   }
 
+  private makePitch(job: Job, price: number, etaSeconds: number): string {
+    const kw = requiredKeyword(job);
+    const style = this.persona.worker;
+    if (style === 'undercutter') return `Low-cost fast delivery. Will include keyword "${kw}". price=${price} eta=${etaSeconds}s`;
+    if (style === 'premium') return `High quality. I will verify keyword "${kw}" and keep it clean. price=${price} eta=${etaSeconds}s`;
+    if (style === 'sprinter') return `Speedrun. Keyword "${kw}" guaranteed. price=${price} eta=${etaSeconds}s`;
+    if (style === 'selective') return `Selective worker. Taking this only because budget is fair. Keyword "${kw}". price=${price} eta=${etaSeconds}s`;
+    return `Balanced bid. Includes "${kw}". price=${price} eta=${etaSeconds}s`;
+  }
+
   private log(line: string) {
     // eslint-disable-next-line no-console
     console.log(line);
   }
 }
-

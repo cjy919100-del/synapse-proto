@@ -61,6 +61,7 @@ export const BidSchema = z.object({
   price: z.number().positive(),
   etaSeconds: z.number().positive(),
   createdAtMs: z.number(),
+  pitch: z.string().optional(),
   bidderRep: z
     .object({
       completed: z.number().nonnegative(),
@@ -95,6 +96,7 @@ export const BidMsgSchema = z.object({
   jobId: z.string(),
   price: z.number().positive(),
   etaSeconds: z.number().positive(),
+  pitch: z.string().optional(),
 });
 export type BidMsg = z.infer<typeof BidMsgSchema>;
 
@@ -110,6 +112,7 @@ export const AwardMsgSchema = z.object({
   type: z.literal('award'),
   jobId: z.string(),
   workerId: z.string(),
+  notes: z.string().optional(),
 });
 export type AwardMsg = z.infer<typeof AwardMsgSchema>;
 

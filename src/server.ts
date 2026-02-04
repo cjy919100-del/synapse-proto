@@ -755,6 +755,7 @@ export class CoreServer extends EventEmitter {
       price: Math.floor(msg.price),
       etaSeconds: Math.floor(msg.etaSeconds),
       createdAtMs: Date.now(),
+      pitch: msg.pitch,
       bidderRep: (() => {
         const rep = this.reputation.get(bidderId) ?? { completed: 0, failed: 0 };
         return { completed: rep.completed, failed: rep.failed, score: this.repScore(rep) };
@@ -815,8 +816,8 @@ export class CoreServer extends EventEmitter {
     await this.addEvidence({
       jobId: job.id,
       kind: 'award',
-      detail: `worker=${workerId.slice(0, 12)} budget_locked=${job.budget} stake_locked=${stake}`,
-      payload: { workerId, budgetLocked: job.budget, stakeLocked: stake },
+      detail: `worker=${workerId.slice(0, 12)} budget_locked=${job.budget} stake_locked=${stake}${msg.notes ? ` notes=${msg.notes}` : ''}`,
+      payload: { workerId, budgetLocked: job.budget, stakeLocked: stake, notes: msg.notes ?? null },
     });
     this.armTimeout(job.id);
 

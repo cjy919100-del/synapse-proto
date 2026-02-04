@@ -128,11 +128,11 @@ export class SynapseDb {
   async insertBid(bid: Bid): Promise<void> {
     await this.pool.query(
       `
-      insert into bids (bid_id, job_id, bidder_id, price, eta_seconds, created_at_ms)
-      values ($1,$2,$3,$4,$5,$6)
+      insert into bids (bid_id, job_id, bidder_id, price, eta_seconds, created_at_ms, pitch)
+      values ($1,$2,$3,$4,$5,$6,$7)
       on conflict (bid_id) do nothing
       `,
-      [bid.id, bid.jobId, bid.bidderId, bid.price, bid.etaSeconds, bid.createdAtMs],
+      [bid.id, bid.jobId, bid.bidderId, bid.price, bid.etaSeconds, bid.createdAtMs, bid.pitch ?? null],
     );
   }
 
@@ -238,7 +238,7 @@ export class SynapseDb {
     );
     const bidsRes = await this.pool.query(
       `
-      select bid_id, job_id, bidder_id, price, eta_seconds, created_at_ms
+      select bid_id, job_id, bidder_id, price, eta_seconds, created_at_ms, pitch
       from bids
       order by created_at_ms desc
       `,
@@ -283,6 +283,7 @@ export class SynapseDb {
         price: Number(r.price),
         etaSeconds: Number(r.eta_seconds),
         createdAtMs: Number(r.created_at_ms),
+        pitch: r.pitch == null ? undefined : String(r.pitch),
       })),
       evidence: evidenceRes.rows.map((r) => ({
         id: String(r.id),
@@ -369,11 +370,20 @@ create table if not exists bids (
   bidder_id text not null references agents(agent_id) on delete cascade,
   price integer not null,
   eta_seconds integer not null,
-  created_at_ms bigint not null
+  created_at_ms bigint not null,
+  pitch text null
 );
 
 create index if not exists bids_job_id_idx on bids(job_id);
 create index if not exists bids_created_at_ms_idx on bids(created_at_ms desc);
+
+do $$
+begin
+  alter table bids add column if not exists pitch text null;
+exception
+  when undefined_table then null;
+  when others then null;
+end $$;
 
 create table if not exists events (
   id bigserial primary key,

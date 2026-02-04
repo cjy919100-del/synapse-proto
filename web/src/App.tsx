@@ -33,6 +33,8 @@ type Bid = {
   price: number;
   etaSeconds: number;
   createdAtMs: number;
+  pitch?: string;
+  bidderRep?: { completed: number; failed: number; score: number };
 };
 
 type EvidenceItem = { id: string; atMs: number; jobId: string; kind: string; detail: string };
@@ -437,6 +439,13 @@ export default function App() {
     return map;
   }, [state.bids]);
 
+  const selectedBids = useMemo(() => {
+    if (!selectedJobId) return [];
+    return Object.values(state.bids)
+      .filter((b) => b.jobId === selectedJobId)
+      .sort((a, b) => (b.bidderRep?.score ?? 0.5) - (a.bidderRep?.score ?? 0.5) || a.price - b.price);
+  }, [selectedJobId, state.bids]);
+
   const openJobs = jobsSorted.filter((j) => j.status === 'open').length;
   const awardedJobs = jobsSorted.filter((j) => j.status === 'awarded').length;
   const completedJobs = jobsSorted.filter((j) => j.status === 'completed').length;
@@ -712,6 +721,32 @@ export default function App() {
                   <div className="rounded-lg border bg-background/30 p-3">
                     <div className="text-muted-foreground">status</div>
                     <div className="mt-1">{selectedJob.status}</div>
+                  </div>
+                </div>
+
+                <div>
+                  <div className="text-xs font-semibold">Applicants</div>
+                  <div className="mt-2 rounded-lg border bg-background/30 p-3">
+                    {selectedBids.length === 0 ? (
+                      <div className="text-xs font-mono text-muted-foreground">No bids yet.</div>
+                    ) : (
+                      <div className="space-y-2">
+                        {selectedBids.slice(0, 8).map((b) => (
+                          <div key={b.id} className="rounded-md border bg-background/40 p-2">
+                            <div className="flex items-baseline justify-between gap-2 text-xs font-mono">
+                              <div className="text-foreground/90">worker {shortId(b.bidderId)}</div>
+                              <div className="text-muted-foreground">
+                                rep {Math.round(((b.bidderRep?.score ?? 0.5) as number) * 100)}% · price {b.price} · eta{' '}
+                                {b.etaSeconds}s
+                              </div>
+                            </div>
+                            {b.pitch ? (
+                              <div className="mt-1 text-[11px] text-muted-foreground">{b.pitch}</div>
+                            ) : null}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
 
