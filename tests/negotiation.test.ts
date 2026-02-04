@@ -54,7 +54,7 @@ async function connectAuthed(url: string, agentName: string) {
   const keyPair = generateEd25519KeyPair();
   const ws = new WebSocket(url);
 
-  const challenge = await waitFor(ws, (m) => m.type === 'challenge');
+  const challenge = await waitFor(ws, (m) => m.type === 'challenge', 7_500, 'challenge');
   const nonce = String(challenge.nonce);
 
   const signature = signAuth({
@@ -75,7 +75,7 @@ async function connectAuthed(url: string, agentName: string) {
     }),
   );
 
-  const authed = await waitFor(ws, (m) => m.type === 'authed');
+  const authed = await waitFor(ws, (m) => m.type === 'authed', 7_500, 'authed');
   return { ws, agentId: String(authed.agentId), credits: Number(authed.credits) };
 }
 
@@ -104,7 +104,7 @@ test('negotiation: counter-offer -> accept -> upfront paid -> settle remainder',
       budget: 100,
     }),
   );
-  const jobPosted = await waitFor(requester.ws, (m) => m.type === 'job_posted');
+  const jobPosted = await waitFor(requester.ws, (m) => m.type === 'job_posted', 7_500, 'job_posted');
   const jobId = String((jobPosted as any).job.id);
 
   // worker bids with terms
@@ -120,7 +120,12 @@ test('negotiation: counter-offer -> accept -> upfront paid -> settle remainder',
     }),
   );
 
-  const bidPosted = await waitFor(requester.ws, (m) => m.type === 'bid_posted' && String((m as any).bid.jobId) === jobId);
+  const bidPosted = await waitFor(
+    requester.ws,
+    (m) => m.type === 'bid_posted' && String((m as any).bid.jobId) === jobId,
+    7_500,
+    'bid_posted',
+  );
   const workerId = String((bidPosted as any).bid.bidderId);
 
   // boss counter-offers (same terms for determinism)
@@ -135,16 +140,33 @@ test('negotiation: counter-offer -> accept -> upfront paid -> settle remainder',
     }),
   );
 
-  await waitFor(worker.ws, (m) => m.type === 'offer_made' && String((m as any).jobId) === jobId);
+  await waitFor(worker.ws, (m) => m.type === 'offer_made' && String((m as any).jobId) === jobId, 7_500, 'offer_made');
 
   // Start waiting before accepting so we don't miss fast ledger broadcasts at award time.
-  const pOfferResponse = waitFor(requester.ws, (m) => m.type === 'offer_response' && String((m as any).jobId) === jobId);
-  const pAwarded = waitFor(worker.ws, (m) => m.type === 'job_awarded' && String((m as any).jobId) === jobId);
+  const pOfferResponse = waitFor(
+    requester.ws,
+    (m) => m.type === 'offer_response' && String((m as any).jobId) === jobId,
+    7_500,
+    'offer_response',
+  );
+  const pAwarded = waitFor(
+    worker.ws,
+    (m) => m.type === 'job_awarded' && String((m as any).jobId) === jobId,
+    7_500,
+    'job_awarded',
+  );
   const pRequesterUpfrontLedger = waitFor(
     requester.ws,
     (m) => m.type === 'ledger_update' && Number((m as any).credits) === requester.credits - 20 && Number((m as any).locked) === 80,
+    7_500,
+    'requester_upfront_ledger',
   );
-  const pWorkerUpfrontLedger = waitFor(worker.ws, (m) => m.type === 'ledger_update' && Number((m as any).credits) === worker.credits + 20);
+  const pWorkerUpfrontLedger = waitFor(
+    worker.ws,
+    (m) => m.type === 'ledger_update' && Number((m as any).credits) === worker.credits + 20,
+    7_500,
+    'worker_upfront_ledger',
+  );
 
   worker.ws.send(
     JSON.stringify({
@@ -160,18 +182,32 @@ test('negotiation: counter-offer -> accept -> upfront paid -> settle remainder',
   await Promise.all([pOfferResponse, pAwarded, pRequesterUpfrontLedger, pWorkerUpfrontLedger]);
 
   // submit -> boss review accept -> settle (remainder 80 paid)
-  const pSubmitted = waitFor(requester.ws, (m) => m.type === 'job_submitted' && String((m as any).jobId) === jobId);
+  const pSubmitted = waitFor(
+    requester.ws,
+    (m) => m.type === 'job_submitted' && String((m as any).jobId) === jobId,
+    7_500,
+    'job_submitted',
+  );
   worker.ws.send(JSON.stringify({ v: PROTOCOL_VERSION, type: 'submit', jobId, result: 'done' }));
   await pSubmitted;
 
-  const pCompleted = waitFor(requester.ws, (m) => m.type === 'job_completed' && String((m as any).jobId) === jobId);
+  const pCompleted = waitFor(
+    requester.ws,
+    (m) => m.type === 'job_completed' && String((m as any).jobId) === jobId,
+    7_500,
+    'job_completed',
+  );
   const pRequesterFinal = waitFor(
     requester.ws,
     (m) => m.type === 'ledger_update' && Number((m as any).credits) === requester.credits - 100 && Number((m as any).locked) === 0,
+    7_500,
+    'requester_final_ledger',
   );
   const pWorkerFinal = waitFor(
     worker.ws,
     (m) => m.type === 'ledger_update' && Number((m as any).credits) === worker.credits + 100 && Number((m as any).locked) === 0,
+    7_500,
+    'worker_final_ledger',
   );
 
   requester.ws.send(JSON.stringify({ v: PROTOCOL_VERSION, type: 'review', jobId, decision: 'accept' }));
