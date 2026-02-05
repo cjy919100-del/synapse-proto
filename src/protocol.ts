@@ -191,6 +191,17 @@ export const OfferResponseMsgSchema = z.object({
 });
 export type OfferResponseMsg = z.infer<typeof OfferResponseMsgSchema>;
 
+export const NegotiationEndedMsgSchema = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  type: z.literal('negotiation_ended'),
+  jobId: z.string(),
+  requesterId: z.string(),
+  workerId: z.string(),
+  reason: z.enum(['rejected', 'max_rounds', 'superseded']),
+  round: z.number().int().min(0),
+});
+export type NegotiationEndedMsg = z.infer<typeof NegotiationEndedMsgSchema>;
+
 export const JobAwardedMsgSchema = z.object({
   v: z.literal(PROTOCOL_VERSION),
   type: z.literal('job_awarded'),
@@ -273,6 +284,7 @@ export const ServerToAgentMsgSchema = z.discriminatedUnion('type', [
   OfferMadeMsgSchema,
   CounterMadeMsgSchema,
   OfferResponseMsgSchema,
+  NegotiationEndedMsgSchema,
   JobSubmittedMsgSchema,
   JobReviewedMsgSchema,
   JobCompletedMsgSchema,

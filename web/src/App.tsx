@@ -334,6 +334,14 @@ function eventToTapeRow(evt: TapeEvent): TapeRow | null {
         detail: `Negotiation r${round}: ${fromRole} proposes (upfront=${upfront}%)`,
       };
     }
+    if (t === 'negotiation_ended') {
+      return {
+        id: nowId(),
+        atMs,
+        kind: 'OTHER',
+        detail: `Negotiation ended: job=${shortId(String((msg as any).jobId ?? ''))} reason=${String((msg as any).reason ?? '?')}`,
+      };
+    }
     if (t === 'offer_response') {
       return {
         id: nowId(),
@@ -399,6 +407,7 @@ function negotiationPill(status: string | undefined) {
   if (s === 'pending') return <Badge variant="secondary">negotiating</Badge>;
   if (s === 'accept' || s === 'accepted') return <Badge variant="accent">accepted</Badge>;
   if (s === 'reject' || s === 'rejected') return <Badge variant="destructive">rejected</Badge>;
+  if (s === 'max_rounds') return <Badge variant="destructive">max rounds</Badge>;
   if (s === 'none') return <Badge variant="outline">no negotiation</Badge>;
   return <Badge variant="outline">{s}</Badge>;
 }

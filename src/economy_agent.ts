@@ -14,6 +14,7 @@ import {
   type OfferMadeMsg,
   type OfferResponseMsg,
   type CounterMadeMsg,
+  type NegotiationEndedMsg,
   ServerToAgentMsgSchema,
 } from './protocol.js';
 
@@ -124,6 +125,8 @@ export class EconomyAgent {
         return this.onOfferResponse(msg);
       case 'counter_made':
         return this.onCounterMade(msg);
+      case 'negotiation_ended':
+        return this.onNegotiationEnded(msg);
       default:
         return;
     }
@@ -407,6 +410,16 @@ export class EconomyAgent {
       notes: acceptable ? `boss=${this.persona.boss} accept_counter` : `boss=${this.persona.boss} counter_back`,
     };
     setTimeout(() => this.send(offer), randInt(350, 1_100));
+  }
+
+  private onNegotiationEnded(msg: NegotiationEndedMsg) {
+    if (!this.agentId) return;
+    if (msg.requesterId !== this.agentId) return; // bosses only
+    // Mark the worker as "do not pick" for this job, then try the next best bid.
+    const set = this.rejectedWorkersByJobId.get(msg.jobId) ?? new Set<string>();
+    set.add(msg.workerId);
+    this.rejectedWorkersByJobId.set(msg.jobId, set);
+    setTimeout(() => void this.pickWinnerAndAward(msg.jobId), randInt(450, 1_250));
   }
 
   private onJobSubmitted(msg: JobSubmittedMsg) {

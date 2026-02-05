@@ -28,6 +28,7 @@ import {
   type OfferMadeMsg,
   type OfferResponseMsg,
   type CounterMadeMsg,
+  type NegotiationEndedMsg,
 } from './protocol.js';
 import { evaluateSubmission } from './evaluator.js';
 
@@ -1022,11 +1023,15 @@ export class CoreServer extends EventEmitter {
 
     const maxRounds = Math.max(1, parseIntEnv('SYNAPSE_NEGOTIATION_MAX_ROUNDS', DEFAULT_NEGOTIATION_MAX_ROUNDS));
     const prev = ((job.payload as any)?.negotiation as NegotiationState | undefined) ?? undefined;
+    if (prev && prev.status === 'pending' && prev.workerId !== workerId) {
+      return this.fail(session.ws, 'negotiation_in_progress');
+    }
     const nextRound = (prev?.round ?? 0) + 1;
     if (nextRound > maxRounds) {
       if (prev) {
         (job.payload as any).negotiation = { ...prev, status: 'max_rounds', decidedAtMs: Date.now() } satisfies NegotiationState;
         await this.addEvidence({ jobId: job.id, kind: 'negotiation_end', detail: `max_rounds=${maxRounds}` });
+        this.broadcastNegotiationEnded(job, { workerId: prev.workerId, reason: 'max_rounds', round: prev.round });
         this.broadcastJobUpdate(job);
         if (this.db) await this.db.updateJob(job);
       }
@@ -1118,6 +1123,7 @@ export class CoreServer extends EventEmitter {
     if (nextRound > maxRounds) {
       (job.payload as any).negotiation = { ...prev, status: 'max_rounds', decidedAtMs: Date.now() } satisfies NegotiationState;
       await this.addEvidence({ jobId: job.id, kind: 'negotiation_end', detail: `max_rounds=${maxRounds}` });
+      this.broadcastNegotiationEnded(job, { workerId: prev.workerId, reason: 'max_rounds', round: prev.round });
       this.broadcastJobUpdate(job);
       if (this.db) await this.db.updateJob(job);
       return this.fail(session.ws, 'negotiation_max_rounds');
@@ -1193,7 +1199,11 @@ export class CoreServer extends EventEmitter {
     this.broadcastJobUpdate(job);
     if (this.db) await this.db.updateJob(job);
 
-    if (msg.decision === 'reject') return;
+    if (msg.decision === 'reject') {
+      await this.addEvidence({ jobId: job.id, kind: 'negotiation_end', detail: `rejected by worker=${workerId.slice(0, 12)}` });
+      this.broadcastNegotiationEnded(job, { workerId, reason: 'rejected', round: negotiation.round });
+      return;
+    }
 
     // Accept: award the job to this worker and embed the accepted terms.
     (job.payload as any).acceptedTerms = negotiation.terms;
@@ -1239,6 +1249,22 @@ export class CoreServer extends EventEmitter {
   private send(ws: WebSocket, msg: ServerToAgentMsg) {
     if (ws.readyState !== ws.OPEN) return;
     ws.send(JSON.stringify(msg));
+  }
+
+  private broadcastNegotiationEnded(
+    job: JobState,
+    args: { workerId: string; reason: NegotiationEndedMsg['reason']; round: number },
+  ) {
+    const out: NegotiationEndedMsg = {
+      v: PROTOCOL_VERSION,
+      type: 'negotiation_ended',
+      jobId: job.id,
+      requesterId: job.requesterId,
+      workerId: args.workerId,
+      reason: args.reason,
+      round: Math.max(0, Math.floor(args.round ?? 0)),
+    };
+    this.broadcast(out);
   }
 
   private broadcastJobUpdate(job: JobState) {
