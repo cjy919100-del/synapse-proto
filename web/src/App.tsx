@@ -412,6 +412,25 @@ function negotiationPill(status: string | undefined) {
   return <Badge variant="outline">{s}</Badge>;
 }
 
+function negotiationSummary(job: Job): { status: string; round?: number; reason?: string } {
+  const payload = job.payload ?? {};
+  const n = (payload as any).negotiation as { status?: string; round?: number } | undefined;
+  const acceptedTerms = (payload as any).acceptedTerms;
+
+  const statusRaw = typeof n?.status === 'string' ? n.status : undefined;
+  const round = typeof n?.round === 'number' ? n.round : undefined;
+
+  // Accepted contracts may move quickly into awarded/completed; keep the win visible.
+  if ((acceptedTerms && typeof acceptedTerms === 'object') || statusRaw === 'accept' || statusRaw === 'accepted') {
+    return { status: 'accept', round, reason: 'contract accepted' };
+  }
+
+  if (statusRaw === 'pending') return { status: 'pending', round, reason: 'in progress' };
+  if (statusRaw === 'reject' || statusRaw === 'rejected') return { status: 'reject', round, reason: 'worker rejected' };
+  if (statusRaw === 'max_rounds') return { status: 'max_rounds', round, reason: 'max rounds reached' };
+  return { status: 'none' };
+}
+
 function parseDecision(detail: string): 'accept' | 'reject' | null {
   const m = detail.match(/decision=(accept|reject)\b/);
   if (!m) return null;
@@ -716,6 +735,19 @@ export default function App() {
                           <div className="text-[10px] text-muted-foreground">
                             req {shortId(job.requesterId)} {job.workerId ? `· worker ${shortId(job.workerId)}` : ''}
                           </div>
+                          {(() => {
+                            const ns = negotiationSummary(job);
+                            if (ns.status === 'none') return null;
+                            return (
+                              <div className="mt-1 flex items-center gap-2 text-[10px] font-mono">
+                                {negotiationPill(ns.status)}
+                                <span className="text-muted-foreground">
+                                  {typeof ns.round === 'number' && ns.round > 0 ? `r${ns.round}` : ''}
+                                  {ns.reason ? `${typeof ns.round === 'number' && ns.round > 0 ? ' · ' : ''}${ns.reason}` : ''}
+                                </span>
+                              </div>
+                            );
+                          })()}
                         </TableCell>
                         <TableCell className="text-right text-accent font-semibold">{job.budget}</TableCell>
                         <TableCell className="text-right">{bidsByJob[job.id] ?? 0}</TableCell>
