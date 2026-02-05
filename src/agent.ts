@@ -8,6 +8,7 @@ import {
   type ChallengeMsg,
   type JobAwardedMsg,
   type JobPostedMsg,
+  type JobUpdatedMsg,
   type JobSubmittedMsg,
   ServerToAgentMsgSchema,
 } from './protocol.js';
@@ -77,6 +78,8 @@ export class FakeAgent {
         return;
       case 'job_posted':
         return this.onJobPosted(msg);
+      case 'job_updated':
+        return this.onJobUpdated(msg);
       case 'bid_posted':
         return this.onBidPosted(msg);
       case 'job_awarded':
@@ -110,47 +113,55 @@ export class FakeAgent {
   }
 
   private onJobPosted(msg: JobPostedMsg) {
+    this.onJobUpsert(msg.job);
+  }
+
+  private onJobUpdated(msg: JobUpdatedMsg) {
+    this.onJobUpsert(msg.job);
+  }
+
+  private onJobUpsert(job: JobPostedMsg['job']) {
     if (!this.agentId) return;
-    if (msg.job.status !== 'open') return;
+    if (job.status !== 'open') return;
 
     if (this.config.role === 'requester') {
-      if (msg.job.requesterId === this.agentId) {
-        this.ownedJobs.add(msg.job.id);
-        this.unawardedOwnedJobs.add(msg.job.id);
+      if (job.requesterId === this.agentId) {
+        this.ownedJobs.add(job.id);
+        this.unawardedOwnedJobs.add(job.id);
       }
       return;
     }
 
     if (this.config.role !== 'worker') return;
-    if (msg.job.requesterId === this.agentId) return;
+    if (job.requesterId === this.agentId) return;
 
     // Simple bidding policy: bid on everything with a fixed price <= budget.
-    const price = Math.min(msg.job.budget, 10);
+    const price = Math.min(job.budget, 10);
     const bid: AgentToServerMsg = {
       v: PROTOCOL_VERSION,
       type: 'bid',
-      jobId: msg.job.id,
+      jobId: job.id,
       price,
       etaSeconds: 2,
     };
     this.send(bid);
 
     // If it's a coding task, start thinking about the solution NOW (async)
-    if (msg.job.kind === 'coding' && msg.job.payload) {
+    if (job.kind === 'coding' && job.payload) {
       const payload = {
-        description: (msg.job.payload.description as string) || 'unknown',
-        template: msg.job.payload.template as string | undefined,
-        tests: (msg.job.payload.tests as any[]) || [],
+        description: (job.payload.description as string) || 'unknown',
+        template: job.payload.template as string | undefined,
+        tests: (job.payload.tests as any[]) || [],
       };
-      this.codingPayloadByJobId.set(msg.job.id, payload);
+      this.codingPayloadByJobId.set(job.id, payload);
 
       // Bid first; solve asynchronously and make award wait for readiness.
       const p = this.llm.solveCodingTask(payload).catch((err) => {
-        this.log(`[agent:${this.config.name}] failed to solve ${msg.job.id.slice(0, 8)}: ${err.message}`);
+        this.log(`[agent:${this.config.name}] failed to solve ${job.id.slice(0, 8)}: ${err.message}`);
         return `// LLM Failed: ${err.message}\n(x) => x`;
       });
-      this.preparedSolutions.set(msg.job.id, p);
-      void p.then(() => this.log(`[agent:${this.config.name}] prepared solution for ${msg.job.id.slice(0, 8)}`));
+      this.preparedSolutions.set(job.id, p);
+      void p.then(() => this.log(`[agent:${this.config.name}] prepared solution for ${job.id.slice(0, 8)}`));
     }
   }
 

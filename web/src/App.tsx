@@ -197,7 +197,7 @@ function reduce(state: State, action: Action): State {
       } else if (action.event.type === 'broadcast') {
         const msg = action.event.msg;
         if (isObject(msg) && typeof msg.type === 'string') {
-          if (msg.type === 'job_posted' && isObject(msg.job) && typeof msg.job.id === 'string') {
+          if ((msg.type === 'job_posted' || msg.type === 'job_updated') && isObject(msg.job) && typeof msg.job.id === 'string') {
             next.jobs[msg.job.id] = msg.job as Job;
           }
           if (msg.type === 'bid_posted' && isObject(msg.bid) && typeof msg.bid.id === 'string') {
@@ -288,6 +288,15 @@ function eventToTapeRow(evt: TapeEvent): TapeRow | null {
         detail: `New contract: "${job.title ?? '?'}" (budget=${job.budget ?? '?'})`,
       };
     }
+    if (t === 'job_updated' && isObject(msg.job)) {
+      const job = msg.job as Partial<Job>;
+      return {
+        id: nowId(),
+        atMs,
+        kind: 'JOB',
+        detail: `Contract updated: "${job.title ?? '?'}" status=${job.status ?? '?'} worker=${shortId(String(job.workerId ?? ''))}`,
+      };
+    }
     if (t === 'bid_posted' && isObject(msg.bid)) {
       const bid = msg.bid as Partial<Bid>;
       return {
@@ -324,23 +333,25 @@ function eventToTapeRow(evt: TapeEvent): TapeRow | null {
     if (t === 'offer_made') {
       const terms = (msg as any).terms;
       const upfront = terms && typeof terms.upfrontPct === 'number' ? Math.round(terms.upfrontPct * 100) : '?';
+      const price = typeof (msg as any).price === 'number' ? Number((msg as any).price) : '?';
       return {
         id: nowId(),
         atMs,
         kind: 'OTHER',
-        detail: `Negotiation: boss -> worker ${shortId(String((msg as any).workerId ?? ''))} (upfront=${upfront}%)`,
+        detail: `Negotiation: boss -> worker ${shortId(String((msg as any).workerId ?? ''))} (price=${price}, upfront=${upfront}%)`,
       };
     }
     if (t === 'counter_made') {
       const terms = (msg as any).terms;
       const upfront = terms && typeof terms.upfrontPct === 'number' ? Math.round(terms.upfrontPct * 100) : '?';
+      const price = typeof (msg as any).price === 'number' ? Number((msg as any).price) : '?';
       const fromRole = String((msg as any).fromRole ?? '?');
       const round = String((msg as any).round ?? '?');
       return {
         id: nowId(),
         atMs,
         kind: 'OTHER',
-        detail: `Negotiation r${round}: ${fromRole} proposes (upfront=${upfront}%)`,
+        detail: `Negotiation r${round}: ${fromRole} proposes (price=${price}, upfront=${upfront}%)`,
       };
     }
     if (t === 'negotiation_ended') {
@@ -602,6 +613,7 @@ export default function App() {
       workerId: String((raw as any).workerId ?? ''),
       bidId: typeof (raw as any).bidId === 'string' ? String((raw as any).bidId) : undefined,
       bidPrice: typeof (raw as any).bidPrice === 'number' ? Number((raw as any).bidPrice) : undefined,
+      price: typeof (raw as any).price === 'number' ? Number((raw as any).price) : undefined,
       terms: terms && typeof terms === 'object' ? (terms as Bid['terms']) : undefined,
       notes: (raw as any).notes == null ? undefined : String((raw as any).notes),
       status: typeof (raw as any).status === 'string' ? String((raw as any).status) : 'pending',
@@ -614,6 +626,7 @@ export default function App() {
             .map((h) => ({
               round: typeof (h as any).round === 'number' ? Number((h as any).round) : 0,
               fromRole: String((h as any).fromRole ?? '?'),
+              price: typeof (h as any).price === 'number' ? Number((h as any).price) : undefined,
               terms: (h as any).terms as Bid['terms'],
               notes: (h as any).notes == null ? undefined : String((h as any).notes),
               atMs: typeof (h as any).atMs === 'number' ? Number((h as any).atMs) : Date.now(),
@@ -628,6 +641,12 @@ export default function App() {
     const raw = (payload as any).acceptedTerms;
     if (!raw || typeof raw !== 'object') return undefined;
     return raw as Bid['terms'];
+  }, [selectedJob?.payload]);
+  const acceptedPrice = useMemo(() => {
+    const payload = selectedJob?.payload;
+    if (!payload) return undefined;
+    const raw = (payload as any).acceptedPrice;
+    return typeof raw === 'number' ? raw : undefined;
   }, [selectedJob?.payload]);
 
   useEffect(() => {
@@ -1071,6 +1090,7 @@ export default function App() {
                                       </div>
                                       <div className="text-muted-foreground">{formatTime(h.atMs)}</div>
                                     </div>
+                                    <div className="mt-1 text-muted-foreground">price {h.price ?? '-'}</div>
                                     <div className="mt-1 text-muted-foreground">terms {termsText(h.terms)}</div>
                                     {h.notes ? <div className="mt-1 text-muted-foreground">{h.notes}</div> : null}
                                   </div>
@@ -1099,7 +1119,11 @@ export default function App() {
                             k: 'contract',
                             title: 'Contract terms (accepted)',
                             atMs: undefined,
-                            body: <div className="text-muted-foreground">terms {termsText(acceptedTerms)}</div>,
+                            body: (
+                              <div className="text-muted-foreground">
+                                price {acceptedPrice ?? n?.price ?? '-'} · terms {termsText(acceptedTerms)}
+                              </div>
+                            ),
                           });
                         }
 

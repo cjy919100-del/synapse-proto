@@ -135,6 +135,7 @@ test('negotiation: counter-offer -> accept -> upfront paid -> settle remainder',
       type: 'counter_offer',
       jobId,
       workerId,
+      price: 70,
       terms: { upfrontPct: 0.2, deadlineSeconds: 8, maxRevisions: 1 },
       notes: 'deal?',
     }),
@@ -151,19 +152,20 @@ test('negotiation: counter-offer -> accept -> upfront paid -> settle remainder',
   );
   const pAwarded = waitFor(
     worker.ws,
-    (m) => m.type === 'job_awarded' && String((m as any).jobId) === jobId,
+    (m) =>
+      m.type === 'job_awarded' && String((m as any).jobId) === jobId && Number((m as any).budgetLocked) === 70,
     7_500,
     'job_awarded',
   );
   const pRequesterUpfrontLedger = waitFor(
     requester.ws,
-    (m) => m.type === 'ledger_update' && Number((m as any).credits) === requester.credits - 20 && Number((m as any).locked) === 80,
+    (m) => m.type === 'ledger_update' && Number((m as any).credits) === requester.credits - 14 && Number((m as any).locked) === 56,
     7_500,
     'requester_upfront_ledger',
   );
   const pWorkerUpfrontLedger = waitFor(
     worker.ws,
-    (m) => m.type === 'ledger_update' && Number((m as any).credits) === worker.credits + 20,
+    (m) => m.type === 'ledger_update' && Number((m as any).credits) === worker.credits + 14,
     7_500,
     'worker_upfront_ledger',
   );
@@ -199,19 +201,20 @@ test('negotiation: counter-offer -> accept -> upfront paid -> settle remainder',
   );
   const pRequesterFinal = waitFor(
     requester.ws,
-    (m) => m.type === 'ledger_update' && Number((m as any).credits) === requester.credits - 100 && Number((m as any).locked) === 0,
+    (m) => m.type === 'ledger_update' && Number((m as any).credits) === requester.credits - 70 && Number((m as any).locked) === 0,
     7_500,
     'requester_final_ledger',
   );
   const pWorkerFinal = waitFor(
     worker.ws,
-    (m) => m.type === 'ledger_update' && Number((m as any).credits) === worker.credits + 100 && Number((m as any).locked) === 0,
+    (m) => m.type === 'ledger_update' && Number((m as any).credits) === worker.credits + 70 && Number((m as any).locked) === 0,
     7_500,
     'worker_final_ledger',
   );
 
   requester.ws.send(JSON.stringify({ v: PROTOCOL_VERSION, type: 'review', jobId, decision: 'accept' }));
-  await Promise.all([pCompleted, pRequesterFinal, pWorkerFinal]);
+  const [completed] = await Promise.all([pCompleted, pRequesterFinal, pWorkerFinal]);
+  if (Number((completed as any).paid) !== 70) throw new Error('expected settled price=70');
 
   requester.ws.close();
   worker.ws.close();
@@ -257,6 +260,7 @@ test('negotiation rounds: worker can counter and boss can counter back', async (
       type: 'counter_offer',
       jobId,
       workerId,
+      price: 86,
       terms: { upfrontPct: 0, deadlineSeconds: 20, maxRevisions: 2 },
       notes: 'initial',
     }),
@@ -281,6 +285,7 @@ test('negotiation rounds: worker can counter and boss can counter back', async (
       type: 'worker_counter',
       jobId,
       requesterId: requester.agentId,
+      price: 92,
       terms: { upfrontPct: 0.2, deadlineSeconds: 10, maxRevisions: 1 },
       notes: 'counter please',
     }),
@@ -294,6 +299,7 @@ test('negotiation rounds: worker can counter and boss can counter back', async (
       type: 'counter_offer',
       jobId,
       workerId,
+      price: 88,
       terms: { upfrontPct: 0.2, deadlineSeconds: 10, maxRevisions: 1 },
       notes: 'ok',
     }),

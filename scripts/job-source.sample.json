@@ -1,0 +1,29 @@
+[
+  {
+    "title": "Fix signup form validation race condition",
+    "description": "When users submit quickly, duplicate requests are sent. Add idempotency guard and tests.",
+    "budget": 420,
+    "kind": "coding",
+    "payload": {
+      "timeoutSeconds": 900
+    }
+  },
+  {
+    "title": "Implement Korean VAT invoice export flow",
+    "description": "Generate CSV with VAT fields and add regression checks for KR locale.",
+    "budget": 560,
+    "kind": "simple",
+    "payload": {
+      "timeoutSeconds": 1200
+    }
+  },
+  {
+    "title": "Improve onboarding completion analytics query",
+    "description": "Optimize query latency and return daily funnel drop-off table for dashboard.",
+    "budget": 380,
+    "kind": "simple",
+    "payload": {
+      "timeoutSeconds": 800
+    }
+  }
+]
