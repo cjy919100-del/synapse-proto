@@ -1,8 +1,7 @@
 import 'dotenv/config';
-import { readFile } from 'node:fs/promises';
 
 import { SynapseDb } from './db.js';
-import { EconomyAgent, type RealJobSeed } from './economy_agent.js';
+import { EconomyAgent } from './economy_agent.js';
 import { CoreServer } from './server.js';
 import { SpectatorServer } from './spectator.js';
 
@@ -19,27 +18,22 @@ function parseBoolEnv(name: string, fallback: boolean): boolean {
   return fallback;
 }
 
-async function loadBacklog(path: string | undefined): Promise<RealJobSeed[]> {
-  if (!path) return [];
-  const raw = await readFile(path, 'utf8');
-  const parsed = JSON.parse(raw) as unknown;
-  if (!Array.isArray(parsed)) throw new Error('SYNAPSE_JOB_SOURCE_FILE must be a JSON array');
+function randomInt(maxExclusive: number): number {
+  return Math.floor(Math.random() * maxExclusive);
+}
 
-  const out: RealJobSeed[] = [];
-  for (const row of parsed) {
-    if (!row || typeof row !== 'object') continue;
-    const title = typeof (row as any).title === 'string' ? (row as any).title.trim() : '';
-    const budget = Number((row as any).budget);
-    if (!title || !Number.isFinite(budget) || budget <= 0) continue;
-    out.push({
-      title,
-      description: typeof (row as any).description === 'string' ? (row as any).description : undefined,
-      budget: Math.floor(budget),
-      kind: typeof (row as any).kind === 'string' ? (row as any).kind : undefined,
-      payload: (row as any).payload && typeof (row as any).payload === 'object' ? ((row as any).payload as Record<string, unknown>) : undefined,
-    });
+function generateAgentName(existing: Set<string>): string {
+  const prefixes = ['swift', 'silent', 'lucky', 'steady', 'keen', 'brisk', 'alpha', 'nova', 'clear', 'prime'];
+  const roles = ['broker', 'worker', 'maker', 'builder', 'solver', 'pilot', 'trader', 'ranger', 'smith', 'forge'];
+
+  for (let i = 0; i < 100; i += 1) {
+    const name = `${prefixes[randomInt(prefixes.length)]}-${roles[randomInt(roles.length)]}-${100 + randomInt(900)}`;
+    if (!existing.has(name)) return name;
   }
-  return out;
+
+  const fallback = `agent-${Date.now()}-${100 + randomInt(900)}`;
+  if (!existing.has(fallback)) return fallback;
+  return `agent-${Date.now()}-${1000 + randomInt(9000)}`;
 }
 
 async function main() {
@@ -53,32 +47,23 @@ async function main() {
   const spectator = new SpectatorServer({ port: spectatorPort, core });
 
   const n = Number(process.env.SYNAPSE_ECO_AGENTS ?? 8);
-  const backlogPath = process.env.SYNAPSE_JOB_SOURCE_FILE;
-  const backlog = await loadBacklog(backlogPath);
-  const syntheticFallback = parseBoolEnv('SYNAPSE_SYNTHETIC_FALLBACK', true);
-  const backlogByAgent: RealJobSeed[][] = Array.from({ length: n }, () => []);
-  backlog.forEach((job, i) => {
-    backlogByAgent[i % n]!.push(job);
-  });
-
-  if (backlog.length > 0) {
-    // eslint-disable-next-line no-console
-    console.log(
-      `[economy] loaded ${backlog.length} real jobs from ${backlogPath}${syntheticFallback ? ' (synthetic fallback on)' : ' (synthetic fallback off)'}`,
-    );
-  }
+  const autoPostJobs = parseBoolEnv('SYNAPSE_AGENT_AUTO_POST', false);
+  // eslint-disable-next-line no-console
+  console.log(`[economy] synthetic auto-post: ${autoPostJobs ? 'on' : 'off'}`);
 
   const agents: EconomyAgent[] = [];
+  const usedNames = new Set<string>();
   for (let i = 0; i < n; i += 1) {
+    const name = generateAgentName(usedNames);
+    usedNames.add(name);
     agents.push(
       new EconomyAgent({
-        name: `agent-${i + 1}`,
+        name,
         url: coreUrl,
         canBoss: true,
         canWork: true,
         maxOpenJobs: 1,
-        backlogJobs: backlogByAgent[i]!,
-        syntheticFallback,
+        autoPostJobs,
       }),
     );
   }

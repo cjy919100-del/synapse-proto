@@ -28,18 +28,8 @@ type EconomyAgentConfig = {
   canWork?: boolean;
   /** Max open jobs this agent keeps posted at once. */
   maxOpenJobs?: number;
-  /** Real backlog tasks; posted before synthetic jobs. */
-  backlogJobs?: RealJobSeed[];
-  /** If false, do not generate synthetic jobs after backlog is exhausted. */
-  syntheticFallback?: boolean;
-};
-
-export type RealJobSeed = {
-  title: string;
-  description?: string;
-  budget: number;
-  kind?: string;
-  payload?: Record<string, unknown>;
+  /** Allow synthetic auto-post loop (simulation only). */
+  autoPostJobs?: boolean;
 };
 
 type BidLite = { bidderId: string; price: number; etaSeconds: number; score: number };
@@ -79,7 +69,6 @@ export class EconomyAgent {
   private readonly awardTimers = new Map<string, NodeJS.Timeout>();
   private readonly assignedJobs = new Set<string>();
   private readonly rejectedWorkersByJobId = new Map<string, Set<string>>();
-  private readonly backlogQueue: RealJobSeed[];
 
   private postTimer: NodeJS.Timeout | null = null;
   private readonly persona: Personality = {
@@ -89,7 +78,6 @@ export class EconomyAgent {
 
   constructor(readonly cfg: EconomyAgentConfig) {
     this.ws = new WebSocket(cfg.url);
-    this.backlogQueue = [...(cfg.backlogJobs ?? [])];
     this.ws.on('open', () => this.log(`[eco:${cfg.name}] connected`));
     this.ws.on('message', (raw: RawData) => this.onMessage(raw.toString('utf8')));
     this.ws.on('close', () => this.log(`[eco:${cfg.name}] disconnected`));
@@ -172,6 +160,7 @@ export class EconomyAgent {
     if (!this.agentId) return;
     const canBoss = this.cfg.canBoss !== false;
     if (!canBoss) return;
+    if (this.cfg.autoPostJobs !== true) return;
 
     const maxOpen = this.cfg.maxOpenJobs ?? 1;
     this.postTimer = setInterval(() => {
@@ -179,45 +168,23 @@ export class EconomyAgent {
       if (this.ownedOpenJobs.size >= maxOpen) return;
       if (spendable(this.credits, this.locked) < 500) return;
 
-      const post = this.nextPostJob();
-      if (!post) return;
-      this.send(post);
-    }, 3_000);
-  }
-
-  private nextPostJob(): AgentToServerMsg | null {
-    const real = this.backlogQueue.shift();
-    if (real) {
-      const budget = Math.max(10, Math.floor(real.budget));
-      return {
+      const kw = `K${randInt(100, 999)}`;
+      const budget = randInt(200, 600);
+      const payload = {
+        requiredKeyword: kw,
+        timeoutSeconds: randInt(6, 12),
+      };
+      const post: AgentToServerMsg = {
         v: PROTOCOL_VERSION,
         type: 'post_job',
-        title: real.title,
-        description: real.description,
+        title: `Write 1-line update including "${kw}"`,
+        description: `Return exactly one sentence that includes the keyword "${kw}".`,
         budget,
-        kind: real.kind ?? 'simple',
-        payload: real.payload ?? {},
+        kind: 'simple',
+        payload,
       };
-    }
-
-    const allowSynthetic = this.cfg.syntheticFallback !== false;
-    if (!allowSynthetic) return null;
-
-    const kw = `K${randInt(100, 999)}`;
-    const budget = randInt(200, 600);
-    const payload = {
-      requiredKeyword: kw,
-      timeoutSeconds: randInt(6, 12),
-    };
-    return {
-      v: PROTOCOL_VERSION,
-      type: 'post_job',
-      title: `Write 1-line update including "${kw}"`,
-      description: `Return exactly one sentence that includes the keyword "${kw}".`,
-      budget,
-      kind: 'simple',
-      payload,
-    };
+      this.send(post);
+    }, 3_000);
   }
 
   private onJobPosted(msg: JobPostedMsg) {
