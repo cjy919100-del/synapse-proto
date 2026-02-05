@@ -216,3 +216,104 @@ test('negotiation: counter-offer -> accept -> upfront paid -> settle remainder',
   requester.ws.close();
   worker.ws.close();
 });
+
+test('negotiation rounds: worker can counter and boss can counter back', async () => {
+  const requester = await connectAuthed(url, 'boss2');
+  const worker = await connectAuthed(url, 'worker2');
+
+  requester.ws.send(
+    JSON.stringify({
+      v: PROTOCOL_VERSION,
+      type: 'post_job',
+      title: 'task: negotiate',
+      budget: 120,
+    }),
+  );
+  const jobPosted = await waitFor(requester.ws, (m) => m.type === 'job_posted', 7_500, 'job_posted');
+  const jobId = String((jobPosted as any).job.id);
+
+  worker.ws.send(
+    JSON.stringify({
+      v: PROTOCOL_VERSION,
+      type: 'bid',
+      jobId,
+      price: 90,
+      etaSeconds: 3,
+      terms: { upfrontPct: 0, deadlineSeconds: 20, maxRevisions: 2 },
+    }),
+  );
+  const bidPosted = await waitFor(
+    requester.ws,
+    (m) => m.type === 'bid_posted' && String((m as any).bid.jobId) === jobId,
+    7_500,
+    'bid_posted',
+  );
+  const workerId = String((bidPosted as any).bid.bidderId);
+
+  // Boss starts with strict offer.
+  requester.ws.send(
+    JSON.stringify({
+      v: PROTOCOL_VERSION,
+      type: 'counter_offer',
+      jobId,
+      workerId,
+      terms: { upfrontPct: 0, deadlineSeconds: 20, maxRevisions: 2 },
+      notes: 'initial',
+    }),
+  );
+  await waitFor(worker.ws, (m) => m.type === 'offer_made' && String((m as any).jobId) === jobId, 7_500, 'offer_made');
+
+  const pWorkerCounterBroadcast = waitFor(
+    requester.ws,
+    (m) =>
+      m.type === 'counter_made' &&
+      String((m as any).jobId) === jobId &&
+      String((m as any).fromRole) === 'worker' &&
+      String((m as any).workerId) === workerId,
+    7_500,
+    'counter_made(worker)',
+  );
+
+  // Worker counters.
+  worker.ws.send(
+    JSON.stringify({
+      v: PROTOCOL_VERSION,
+      type: 'worker_counter',
+      jobId,
+      requesterId: requester.agentId,
+      terms: { upfrontPct: 0.2, deadlineSeconds: 10, maxRevisions: 1 },
+      notes: 'counter please',
+    }),
+  );
+  await pWorkerCounterBroadcast;
+
+  // Boss counters back by accepting worker terms (echo).
+  requester.ws.send(
+    JSON.stringify({
+      v: PROTOCOL_VERSION,
+      type: 'counter_offer',
+      jobId,
+      workerId,
+      terms: { upfrontPct: 0.2, deadlineSeconds: 10, maxRevisions: 1 },
+      notes: 'ok',
+    }),
+  );
+  await waitFor(worker.ws, (m) => m.type === 'offer_made' && String((m as any).jobId) === jobId, 7_500, 'offer_made_2');
+
+  // Worker accepts -> award.
+  const pAwarded = waitFor(worker.ws, (m) => m.type === 'job_awarded' && String((m as any).jobId) === jobId, 7_500, 'job_awarded');
+  worker.ws.send(
+    JSON.stringify({
+      v: PROTOCOL_VERSION,
+      type: 'offer_decision',
+      jobId,
+      requesterId: requester.agentId,
+      decision: 'accept',
+      notes: 'deal',
+    }),
+  );
+  await pAwarded;
+
+  requester.ws.close();
+  worker.ws.close();
+});

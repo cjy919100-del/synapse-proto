@@ -27,6 +27,7 @@ import {
   type JobReviewedMsg,
   type OfferMadeMsg,
   type OfferResponseMsg,
+  type CounterMadeMsg,
 } from './protocol.js';
 import { evaluateSubmission } from './evaluator.js';
 
@@ -59,9 +60,23 @@ type JobState = Job & {
 
 type Terms = NonNullable<Bid['terms']>;
 
+type NegotiationState = {
+  workerId: string;
+  bidId: string;
+  bidPrice: number;
+  status: 'pending' | 'accept' | 'reject' | 'max_rounds';
+  round: number;
+  terms: Terms;
+  notes?: string | null;
+  atMs: number;
+  decidedAtMs?: number;
+  history: Array<{ round: number; fromRole: 'boss' | 'worker'; terms: Terms; notes?: string | null; atMs: number }>;
+};
+
 const DEFAULT_STARTING_CREDITS = 1_000;
 const DEFAULT_WORKER_STAKE_PCT = 0.05;
 const DEFAULT_WORKER_SLASH_PCT = 0.5;
+const DEFAULT_NEGOTIATION_MAX_ROUNDS = 3;
 
 function parsePctEnv(name: string, fallback: number): number {
   const v = process.env[name];
@@ -70,6 +85,12 @@ function parsePctEnv(name: string, fallback: number): number {
   return Number.isFinite(n) && n >= 0 && n <= 1 ? n : fallback;
 }
 
+function parseIntEnv(name: string, fallback: number): number {
+  const v = process.env[name];
+  if (!v) return fallback;
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.floor(n) : fallback;
+}
 type TapeEvent =
   | { type: 'agent_authed'; agentId: string; agentName: string; credits: number }
   | { type: 'ledger_update'; agentId: string; credits: number; locked: number }
@@ -185,6 +206,8 @@ export class CoreServer extends EventEmitter {
         return await this.handleAward(session, msg);
       case 'counter_offer':
         return await this.handleCounterOffer(session, msg);
+      case 'worker_counter':
+        return await this.handleWorkerCounter(session, msg);
       case 'offer_decision':
         return await this.handleOfferDecision(session, msg);
       case 'submit':
@@ -997,6 +1020,19 @@ export class CoreServer extends EventEmitter {
     const bid = job.bids.find((b) => b.bidderId === workerId);
     if (!bid) return this.fail(session.ws, 'worker_has_no_bid');
 
+    const maxRounds = Math.max(1, parseIntEnv('SYNAPSE_NEGOTIATION_MAX_ROUNDS', DEFAULT_NEGOTIATION_MAX_ROUNDS));
+    const prev = ((job.payload as any)?.negotiation as NegotiationState | undefined) ?? undefined;
+    const nextRound = (prev?.round ?? 0) + 1;
+    if (nextRound > maxRounds) {
+      if (prev) {
+        (job.payload as any).negotiation = { ...prev, status: 'max_rounds', decidedAtMs: Date.now() } satisfies NegotiationState;
+        await this.addEvidence({ jobId: job.id, kind: 'negotiation_end', detail: `max_rounds=${maxRounds}` });
+        this.broadcastJobUpdate(job);
+        if (this.db) await this.db.updateJob(job);
+      }
+      return this.fail(session.ws, 'negotiation_max_rounds');
+    }
+
     const offer: OfferMadeMsg = {
       v: PROTOCOL_VERSION,
       type: 'offer_made',
@@ -1007,6 +1043,20 @@ export class CoreServer extends EventEmitter {
       notes: msg.notes,
     };
     this.broadcast(offer);
+
+    const counterMade: CounterMadeMsg = {
+      v: PROTOCOL_VERSION,
+      type: 'counter_made',
+      jobId: job.id,
+      requesterId,
+      workerId,
+      fromRole: 'boss',
+      fromId: requesterId,
+      terms: msg.terms,
+      notes: msg.notes,
+      round: nextRound,
+    };
+    this.broadcast(counterMade);
     await this.addEvidence({
       jobId: job.id,
       kind: 'offer',
@@ -1016,19 +1066,98 @@ export class CoreServer extends EventEmitter {
       payload: offer,
     });
 
-    // Remember the active offer on the job.
+    const base: NegotiationState =
+      prev && prev.workerId === workerId
+        ? prev
+        : {
+            workerId,
+            bidId: bid.id,
+            bidPrice: bid.price,
+            status: 'pending',
+            round: 0,
+            terms: msg.terms,
+            notes: msg.notes ?? null,
+            atMs: Date.now(),
+            history: [],
+          };
+
+    const history = [
+      ...(base.history ?? []),
+      { round: nextRound, fromRole: 'boss' as const, terms: msg.terms, notes: msg.notes ?? null, atMs: Date.now() },
+    ];
+
     job.payload = {
       ...(job.payload ?? {}),
       negotiation: {
-        workerId,
-        bidId: bid.id,
-        bidPrice: bid.price,
+        ...base,
+        status: 'pending',
+        round: nextRound,
         terms: msg.terms,
         notes: msg.notes ?? null,
-        status: 'pending',
-        atMs: Date.now(),
-      },
+        history,
+      } satisfies NegotiationState,
     };
+    this.broadcastJobUpdate(job);
+    if (this.db) await this.db.updateJob(job);
+  }
+
+  private async handleWorkerCounter(session: Session, msg: AgentToServerMsg & { type: 'worker_counter' }) {
+    const workerId = session.agentId!;
+    const job = this.jobs.get(msg.jobId);
+    if (!job) return this.fail(session.ws, 'job_not_found');
+    if (job.status !== 'open') return this.fail(session.ws, 'job_not_open');
+    if (msg.requesterId !== job.requesterId) return this.fail(session.ws, 'bad_requester');
+
+    const prev = ((job.payload as any)?.negotiation as NegotiationState | undefined) ?? undefined;
+    if (!prev) return this.fail(session.ws, 'no_active_offer');
+    if (prev.workerId !== workerId) return this.fail(session.ws, 'not_offer_target');
+    if (prev.status !== 'pending') return this.fail(session.ws, 'negotiation_not_pending');
+
+    const maxRounds = Math.max(1, parseIntEnv('SYNAPSE_NEGOTIATION_MAX_ROUNDS', DEFAULT_NEGOTIATION_MAX_ROUNDS));
+    const nextRound = (prev.round ?? 0) + 1;
+    if (nextRound > maxRounds) {
+      (job.payload as any).negotiation = { ...prev, status: 'max_rounds', decidedAtMs: Date.now() } satisfies NegotiationState;
+      await this.addEvidence({ jobId: job.id, kind: 'negotiation_end', detail: `max_rounds=${maxRounds}` });
+      this.broadcastJobUpdate(job);
+      if (this.db) await this.db.updateJob(job);
+      return this.fail(session.ws, 'negotiation_max_rounds');
+    }
+
+    const counterMade: CounterMadeMsg = {
+      v: PROTOCOL_VERSION,
+      type: 'counter_made',
+      jobId: job.id,
+      requesterId: job.requesterId,
+      workerId,
+      fromRole: 'worker',
+      fromId: workerId,
+      terms: msg.terms,
+      notes: msg.notes,
+      round: nextRound,
+    };
+    this.broadcast(counterMade);
+    await this.addEvidence({
+      jobId: job.id,
+      kind: 'counter',
+      detail: `worker -> boss upfront=${msg.terms.upfrontPct} deadline=${msg.terms.deadlineSeconds}s rev=${msg.terms.maxRevisions}${msg.notes ? ` notes=${msg.notes}` : ''}`,
+      payload: counterMade,
+    });
+
+    const history = [
+      ...(prev.history ?? []),
+      { round: nextRound, fromRole: 'worker' as const, terms: msg.terms, notes: msg.notes ?? null, atMs: Date.now() },
+    ];
+
+    (job.payload as any).negotiation = {
+      ...prev,
+      status: 'pending',
+      round: nextRound,
+      terms: msg.terms,
+      notes: msg.notes ?? null,
+      history,
+    } satisfies NegotiationState;
+
+    this.broadcastJobUpdate(job);
     if (this.db) await this.db.updateJob(job);
   }
 
@@ -1037,9 +1166,7 @@ export class CoreServer extends EventEmitter {
     const job = this.jobs.get(msg.jobId);
     if (!job) return this.fail(session.ws, 'job_not_found');
 
-    const negotiation = (job.payload as any)?.negotiation as
-      | { workerId: string; bidPrice: number; terms: Terms; status: string }
-      | undefined;
+    const negotiation = (job.payload as any)?.negotiation as NegotiationState | undefined;
     if (!negotiation) return this.fail(session.ws, 'no_active_offer');
     if (negotiation.workerId !== workerId) return this.fail(session.ws, 'not_offer_target');
     if (job.status !== 'open') return this.fail(session.ws, 'job_not_open');
@@ -1062,7 +1189,8 @@ export class CoreServer extends EventEmitter {
       payload: out,
     });
 
-    (job.payload as any).negotiation = { ...(job.payload as any).negotiation, status: msg.decision, decidedAtMs: Date.now() };
+    (job.payload as any).negotiation = { ...negotiation, status: msg.decision, decidedAtMs: Date.now() } satisfies NegotiationState;
+    this.broadcastJobUpdate(job);
     if (this.db) await this.db.updateJob(job);
 
     if (msg.decision === 'reject') return;
@@ -1111,6 +1239,27 @@ export class CoreServer extends EventEmitter {
   private send(ws: WebSocket, msg: ServerToAgentMsg) {
     if (ws.readyState !== ws.OPEN) return;
     ws.send(JSON.stringify(msg));
+  }
+
+  private broadcastJobUpdate(job: JobState) {
+    // Use job_posted as a generic "job upsert" message; the spectator UI already treats it as an upsert.
+    const out: JobPostedMsg = {
+      v: PROTOCOL_VERSION,
+      type: 'job_posted',
+      job: {
+        id: job.id,
+        title: job.title,
+        description: job.description,
+        budget: job.budget,
+        requesterId: job.requesterId,
+        createdAtMs: job.createdAtMs,
+        status: job.status,
+        workerId: job.workerId,
+        kind: job.kind,
+        payload: job.payload,
+      },
+    };
+    this.broadcast(out);
   }
 
   private broadcast(msg: ServerToAgentMsg) {

@@ -13,6 +13,7 @@ import {
   type JobSubmittedMsg,
   type OfferMadeMsg,
   type OfferResponseMsg,
+  type CounterMadeMsg,
   ServerToAgentMsgSchema,
 } from './protocol.js';
 
@@ -62,6 +63,7 @@ export class EconomyAgent {
   private readonly bidsByJobId = new Map<string, BidLite[]>();
   private readonly awardTimers = new Map<string, NodeJS.Timeout>();
   private readonly assignedJobs = new Set<string>();
+  private readonly rejectedWorkersByJobId = new Map<string, Set<string>>();
 
   private postTimer: NodeJS.Timeout | null = null;
   private readonly persona: Personality = {
@@ -120,6 +122,8 @@ export class EconomyAgent {
         return this.onOfferMade(msg);
       case 'offer_response':
         return this.onOfferResponse(msg);
+      case 'counter_made':
+        return this.onCounterMade(msg);
       default:
         return;
     }
@@ -252,7 +256,8 @@ export class EconomyAgent {
     if (!job || job.status !== 'open') return;
     if (job.requesterId !== this.agentId) return;
 
-    const bids = this.bidsByJobId.get(jobId) ?? [];
+    const rejected = this.rejectedWorkersByJobId.get(jobId) ?? new Set<string>();
+    const bids = (this.bidsByJobId.get(jobId) ?? []).filter((b) => !rejected.has(b.bidderId));
     if (bids.length === 0) return;
 
     // Personality-driven utility.
@@ -290,15 +295,16 @@ export class EconomyAgent {
       notes: `boss=${this.persona.boss} counter_terms upfront=${Math.round(terms.upfrontPct * 100)}% deadline=${terms.deadlineSeconds}s rev=${terms.maxRevisions}`,
     };
     this.send(offer);
-
-    // This job is no longer open (server will broadcast award), but we can optimistically stop posting duplicates.
-    this.ownedOpenJobs.delete(jobId);
   }
 
   private onJobAwarded(msg: JobAwardedMsg) {
     if (!this.agentId) return;
     const job = this.openJobs.get(msg.jobId);
     if (job) this.openJobs.set(msg.jobId, { ...job, status: 'awarded', workerId: msg.workerId });
+
+    // If this agent owns the job, it should no longer count as an open contract.
+    const owned = this.openJobs.get(msg.jobId);
+    if (owned && owned.requesterId === this.agentId) this.ownedOpenJobs.delete(msg.jobId);
 
     if (msg.workerId !== this.agentId) return;
     this.assignedJobs.add(msg.jobId);
@@ -325,6 +331,26 @@ export class EconomyAgent {
     if (this.persona.worker === 'premium' && t.upfrontPct < 0.1) accept = Math.random() < 0.65;
     if (this.persona.worker === 'selective' && t.maxRevisions > 1) accept = false;
 
+    // Sometimes counter instead of hard reject to make negotiation feel real.
+    const wantsCounter = !accept ? Math.random() < 0.8 : Math.random() < 0.15;
+    if (wantsCounter && (this.persona.worker === 'premium' || this.persona.worker === 'sprinter' || this.persona.worker === 'balanced')) {
+      const counter = { ...t };
+      if (this.persona.worker === 'premium') counter.upfrontPct = Math.min(0.35, Math.max(counter.upfrontPct, 0.2));
+      if (this.persona.worker === 'sprinter') counter.deadlineSeconds = Math.max(4, Math.min(counter.deadlineSeconds, 10));
+      if (this.persona.worker === 'balanced') counter.maxRevisions = Math.max(0, Math.min(counter.maxRevisions, 1));
+
+      const msgOut: AgentToServerMsg = {
+        v: PROTOCOL_VERSION,
+        type: 'worker_counter',
+        jobId: msg.jobId,
+        requesterId: msg.requesterId,
+        terms: counter,
+        notes: `worker=${this.persona.worker} counter`,
+      };
+      setTimeout(() => this.send(msgOut), randInt(300, 900));
+      return;
+    }
+
     const decision: AgentToServerMsg = {
       v: PROTOCOL_VERSION,
       type: 'offer_decision',
@@ -337,7 +363,50 @@ export class EconomyAgent {
   }
 
   private onOfferResponse(_msg: OfferResponseMsg) {
-    // Spectator value only; we don't need to react here.
+    // If a worker rejects, a boss should try another candidate to keep the world moving.
+    if (!this.agentId) return;
+    if (_msg.requesterId !== this.agentId) return;
+    if (_msg.decision !== 'reject') return;
+    const set = this.rejectedWorkersByJobId.get(_msg.jobId) ?? new Set<string>();
+    set.add(_msg.workerId);
+    this.rejectedWorkersByJobId.set(_msg.jobId, set);
+    setTimeout(() => void this.pickWinnerAndAward(_msg.jobId), randInt(400, 1_200));
+  }
+
+  private onCounterMade(msg: CounterMadeMsg) {
+    if (!this.agentId) return;
+    // Only bosses respond to worker counters for their own jobs.
+    if (msg.requesterId !== this.agentId) return;
+    if (msg.fromRole !== 'worker') return;
+
+    const base = msg.terms;
+    const acceptable = (() => {
+      if (this.persona.boss === 'risk_averse') return base.maxRevisions <= 0 && base.upfrontPct <= 0.1;
+      if (this.persona.boss === 'cost_cutter') return base.upfrontPct <= 0.1;
+      if (this.persona.boss === 'speed_runner') return base.deadlineSeconds <= 10 && base.maxRevisions <= 0;
+      return true;
+    })();
+
+    const terms = (() => {
+      if (acceptable) return base;
+      const t = { ...base };
+      if (this.persona.boss === 'cost_cutter') t.upfrontPct = 0;
+      if (this.persona.boss === 'risk_averse') t.maxRevisions = 0;
+      if (this.persona.boss === 'speed_runner') t.deadlineSeconds = Math.max(4, Math.min(10, t.deadlineSeconds));
+      // balanced: small concession
+      if (this.persona.boss === 'balanced') t.maxRevisions = Math.max(0, Math.min(1, t.maxRevisions));
+      return t;
+    })();
+
+    const offer: AgentToServerMsg = {
+      v: PROTOCOL_VERSION,
+      type: 'counter_offer',
+      jobId: msg.jobId,
+      workerId: msg.workerId,
+      terms,
+      notes: acceptable ? `boss=${this.persona.boss} accept_counter` : `boss=${this.persona.boss} counter_back`,
+    };
+    setTimeout(() => this.send(offer), randInt(350, 1_100));
   }
 
   private onJobSubmitted(msg: JobSubmittedMsg) {

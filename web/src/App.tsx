@@ -322,6 +322,18 @@ function eventToTapeRow(evt: TapeEvent): TapeRow | null {
         detail: `Negotiation: boss -> worker ${shortId(String((msg as any).workerId ?? ''))} (upfront=${upfront}%)`,
       };
     }
+    if (t === 'counter_made') {
+      const terms = (msg as any).terms;
+      const upfront = terms && typeof terms.upfrontPct === 'number' ? Math.round(terms.upfrontPct * 100) : '?';
+      const fromRole = String((msg as any).fromRole ?? '?');
+      const round = String((msg as any).round ?? '?');
+      return {
+        id: nowId(),
+        atMs,
+        kind: 'OTHER',
+        detail: `Negotiation r${round}: ${fromRole} proposes (upfront=${upfront}%)`,
+      };
+    }
     if (t === 'offer_response') {
       return {
         id: nowId(),
@@ -504,6 +516,7 @@ export default function App() {
     const raw = (payload as any).negotiation;
     if (!raw || typeof raw !== 'object') return null;
     const terms = (raw as any).terms;
+    const historyRaw = (raw as any).history;
     return {
       workerId: String((raw as any).workerId ?? ''),
       bidId: typeof (raw as any).bidId === 'string' ? String((raw as any).bidId) : undefined,
@@ -511,8 +524,20 @@ export default function App() {
       terms: terms && typeof terms === 'object' ? (terms as Bid['terms']) : undefined,
       notes: (raw as any).notes == null ? undefined : String((raw as any).notes),
       status: typeof (raw as any).status === 'string' ? String((raw as any).status) : 'pending',
+      round: typeof (raw as any).round === 'number' ? Number((raw as any).round) : undefined,
       atMs: typeof (raw as any).atMs === 'number' ? Number((raw as any).atMs) : undefined,
       decidedAtMs: typeof (raw as any).decidedAtMs === 'number' ? Number((raw as any).decidedAtMs) : undefined,
+      history: Array.isArray(historyRaw)
+        ? historyRaw
+            .filter((h) => h && typeof h === 'object')
+            .map((h) => ({
+              round: typeof (h as any).round === 'number' ? Number((h as any).round) : 0,
+              fromRole: String((h as any).fromRole ?? '?'),
+              terms: (h as any).terms as Bid['terms'],
+              notes: (h as any).notes == null ? undefined : String((h as any).notes),
+              atMs: typeof (h as any).atMs === 'number' ? Number((h as any).atMs) : Date.now(),
+            }))
+        : [],
     };
   }, [selectedJob?.payload]);
 
@@ -838,72 +863,80 @@ export default function App() {
 
                         const decision = respEv ? parseDecision(respEv.detail) : null;
 
-                        const steps: Array<{ k: string; title: string; atMs?: number; body: React.ReactNode }> = [
-                          {
-                            k: 'bid',
-                            title: '1) Worker proposal',
-                            atMs: bid?.createdAtMs,
-                            body: bid ? (
-                              <div className="space-y-1">
-                                <div className="text-foreground/90">
-                                  worker {shortId(bid.bidderId)} · price {bid.price} · eta {bid.etaSeconds}s
-                                </div>
-                                <div className="text-muted-foreground">terms {termsText(bid.terms)}</div>
-                                {bid.pitch ? <div className="text-muted-foreground">{bid.pitch}</div> : null}
+                        const transcript = [...(n?.history ?? [])].sort((a, b) => a.atMs - b.atMs);
+
+                        const cards: Array<{ k: string; title: string; atMs?: number; body: React.ReactNode }> = [];
+
+                        cards.push({
+                          k: 'bid',
+                          title: 'Worker proposal (bid)',
+                          atMs: bid?.createdAtMs,
+                          body: bid ? (
+                            <div className="space-y-1">
+                              <div className="text-foreground/90">
+                                worker {shortId(bid.bidderId)} · price {bid.price} · eta {bid.etaSeconds}s
+                              </div>
+                              <div className="text-muted-foreground">terms {termsText(bid.terms)}</div>
+                              {bid.pitch ? <div className="text-muted-foreground">{bid.pitch}</div> : null}
+                            </div>
+                          ) : (
+                            <div className="text-muted-foreground">No bid yet.</div>
+                          ),
+                        });
+
+                        cards.push({
+                          k: 'transcript',
+                          title: 'Negotiation transcript',
+                          atMs: undefined,
+                          body:
+                            transcript.length === 0 ? (
+                              <div className="text-muted-foreground">
+                                {offerEv ? offerEv.detail : 'No negotiation yet.'}
                               </div>
                             ) : (
-                              <div className="text-muted-foreground">No bid yet.</div>
-                            ),
-                          },
-                          {
-                            k: 'offer',
-                            title: '2) Boss counter-offer',
-                            atMs: offerEv?.atMs ?? n?.atMs,
-                            body: n?.terms ? (
-                              <div className="space-y-1">
-                                <div className="text-foreground/90">to worker {shortId(n.workerId)}</div>
-                                <div className="text-muted-foreground">terms {termsText(n.terms)}</div>
-                                {n.notes ? <div className="text-muted-foreground">{n.notes}</div> : null}
+                              <div className="space-y-2">
+                                {transcript.map((h, idx) => (
+                                  <div key={`${h.atMs}-${idx}`} className="rounded-md border bg-background/30 p-2">
+                                    <div className="flex items-baseline justify-between gap-2">
+                                      <div className="text-foreground/90 font-semibold">
+                                        r{h.round} · {h.fromRole === 'boss' ? 'boss' : 'worker'}
+                                      </div>
+                                      <div className="text-muted-foreground">{formatTime(h.atMs)}</div>
+                                    </div>
+                                    <div className="mt-1 text-muted-foreground">terms {termsText(h.terms)}</div>
+                                    {h.notes ? <div className="mt-1 text-muted-foreground">{h.notes}</div> : null}
+                                  </div>
+                                ))}
                               </div>
-                            ) : offerEv ? (
-                              <div className="text-muted-foreground">{offerEv.detail}</div>
-                            ) : (
-                              <div className="text-muted-foreground">No offer yet.</div>
                             ),
-                          },
-                          {
-                            k: 'decision',
-                            title: '3) Worker decision',
-                            atMs: respEv?.atMs ?? n?.decidedAtMs,
-                            body: respEv ? (
-                              <div className="space-y-1">
-                                <div className="text-foreground/90">
-                                  {decision ? negotiationPill(decision) : null} <span className="ml-2">{respEv.detail}</span>
-                                </div>
-                              </div>
-                            ) : n?.status && n.status !== 'pending' ? (
-                              <div className="text-foreground/90">{negotiationPill(n.status)}</div>
-                            ) : (
-                              <div className="text-muted-foreground">Waiting…</div>
-                            ),
-                          },
-                        ];
+                        });
+
+                        cards.push({
+                          k: 'decision',
+                          title: 'Worker decision',
+                          atMs: respEv?.atMs ?? n?.decidedAtMs,
+                          body: respEv ? (
+                            <div className="text-foreground/90">
+                              {decision ? negotiationPill(decision) : null} <span className="ml-2">{respEv.detail}</span>
+                            </div>
+                          ) : n?.status && n.status !== 'pending' ? (
+                            <div className="text-foreground/90">{negotiationPill(n.status)}</div>
+                          ) : (
+                            <div className="text-muted-foreground">Waiting…</div>
+                          ),
+                        });
 
                         if (acceptedTerms) {
-                          steps.push({
+                          cards.push({
                             k: 'contract',
-                            title: '4) Contract terms (accepted)',
+                            title: 'Contract terms (accepted)',
                             atMs: undefined,
-                            body: (
-                              <div className="space-y-1">
-                                <div className="text-muted-foreground">terms {termsText(acceptedTerms)}</div>
-                              </div>
-                            ),
+                            body: <div className="text-muted-foreground">terms {termsText(acceptedTerms)}</div>,
                           });
                         }
 
                         if (upfrontEv) {
-                          steps.push({
+                          cards.push({
                             k: 'upfront',
                             title: 'Upfront (deposit)',
                             atMs: upfrontEv.atMs,
@@ -913,13 +946,13 @@ export default function App() {
 
                         return (
                           <div className="space-y-2 text-[11px] font-mono">
-                            {steps.map((s) => (
-                              <div key={s.k} className="rounded-md border bg-background/40 p-2">
+                            {cards.map((c) => (
+                              <div key={c.k} className="rounded-md border bg-background/40 p-2">
                                 <div className="flex items-baseline justify-between gap-2">
-                                  <div className="text-foreground/90 font-semibold">{s.title}</div>
-                                  {s.atMs ? <div className="text-muted-foreground">{formatTime(s.atMs)}</div> : null}
+                                  <div className="text-foreground/90 font-semibold">{c.title}</div>
+                                  {c.atMs ? <div className="text-muted-foreground">{formatTime(c.atMs)}</div> : null}
                                 </div>
-                                <div className="mt-1">{s.body}</div>
+                                <div className="mt-1">{c.body}</div>
                               </div>
                             ))}
                           </div>

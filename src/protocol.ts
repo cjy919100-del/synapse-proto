@@ -54,6 +54,13 @@ export const JobSchema = z.object({
 });
 export type Job = z.infer<typeof JobSchema>;
 
+export const TermsSchema = z.object({
+  upfrontPct: z.number().min(0).max(1),
+  deadlineSeconds: z.number().positive(),
+  maxRevisions: z.number().int().min(0).max(10),
+});
+export type Terms = z.infer<typeof TermsSchema>;
+
 export const BidSchema = z.object({
   id: z.string(),
   jobId: z.string(),
@@ -62,13 +69,7 @@ export const BidSchema = z.object({
   etaSeconds: z.number().positive(),
   createdAtMs: z.number(),
   pitch: z.string().optional(),
-  terms: z
-    .object({
-      upfrontPct: z.number().min(0).max(1),
-      deadlineSeconds: z.number().positive(),
-      maxRevisions: z.number().int().min(0).max(10),
-    })
-    .optional(),
+  terms: TermsSchema.optional(),
   bidderRep: z
     .object({
       completed: z.number().nonnegative(),
@@ -104,13 +105,7 @@ export const BidMsgSchema = z.object({
   price: z.number().positive(),
   etaSeconds: z.number().positive(),
   pitch: z.string().optional(),
-  terms: z
-    .object({
-      upfrontPct: z.number().min(0).max(1),
-      deadlineSeconds: z.number().positive(),
-      maxRevisions: z.number().int().min(0).max(10),
-    })
-    .optional(),
+  terms: TermsSchema.optional(),
 });
 export type BidMsg = z.infer<typeof BidMsgSchema>;
 
@@ -135,14 +130,20 @@ export const CounterOfferMsgSchema = z.object({
   type: z.literal('counter_offer'),
   jobId: z.string(),
   workerId: z.string(),
-  terms: z.object({
-    upfrontPct: z.number().min(0).max(1),
-    deadlineSeconds: z.number().positive(),
-    maxRevisions: z.number().int().min(0).max(10),
-  }),
+  terms: TermsSchema,
   notes: z.string().optional(),
 });
 export type CounterOfferMsg = z.infer<typeof CounterOfferMsgSchema>;
+
+export const WorkerCounterMsgSchema = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  type: z.literal('worker_counter'),
+  jobId: z.string(),
+  requesterId: z.string(),
+  terms: TermsSchema,
+  notes: z.string().optional(),
+});
+export type WorkerCounterMsg = z.infer<typeof WorkerCounterMsgSchema>;
 
 export const OfferDecisionMsgSchema = z.object({
   v: z.literal(PROTOCOL_VERSION),
@@ -160,14 +161,24 @@ export const OfferMadeMsgSchema = z.object({
   jobId: z.string(),
   requesterId: z.string(),
   workerId: z.string(),
-  terms: z.object({
-    upfrontPct: z.number().min(0).max(1),
-    deadlineSeconds: z.number().positive(),
-    maxRevisions: z.number().int().min(0).max(10),
-  }),
+  terms: TermsSchema,
   notes: z.string().optional(),
 });
 export type OfferMadeMsg = z.infer<typeof OfferMadeMsgSchema>;
+
+export const CounterMadeMsgSchema = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  type: z.literal('counter_made'),
+  jobId: z.string(),
+  requesterId: z.string(),
+  workerId: z.string(),
+  fromRole: z.enum(['boss', 'worker']),
+  fromId: z.string(),
+  terms: TermsSchema,
+  notes: z.string().optional(),
+  round: z.number().int().min(1),
+});
+export type CounterMadeMsg = z.infer<typeof CounterMadeMsgSchema>;
 
 export const OfferResponseMsgSchema = z.object({
   v: z.literal(PROTOCOL_VERSION),
@@ -260,6 +271,7 @@ export const ServerToAgentMsgSchema = z.discriminatedUnion('type', [
   BidPostedMsgSchema,
   JobAwardedMsgSchema,
   OfferMadeMsgSchema,
+  CounterMadeMsgSchema,
   OfferResponseMsgSchema,
   JobSubmittedMsgSchema,
   JobReviewedMsgSchema,
@@ -275,6 +287,7 @@ export const AgentToServerMsgSchema = z.discriminatedUnion('type', [
   BidMsgSchema,
   AwardMsgSchema,
   CounterOfferMsgSchema,
+  WorkerCounterMsgSchema,
   OfferDecisionMsgSchema,
   SubmitMsgSchema,
   ReviewMsgSchema,
