@@ -64,6 +64,7 @@ type State = {
   status: ConnectionStatus;
   wsUrl: string;
   agents: Record<string, Agent>;
+  baselineCredits: Record<string, number>;
   jobs: Record<string, Job>;
   bids: Record<string, Bid>;
   evidence: EvidenceItem[];
@@ -129,12 +130,18 @@ function reduce(state: State, action: Action): State {
       const bids: Record<string, Bid> = {};
       for (const b of action.snapshot.bids) bids[b.id] = b;
 
-      return { ...state, agents, jobs, bids, evidence: action.snapshot.evidence ?? [] };
+      const baselineCredits = { ...state.baselineCredits };
+      for (const a of action.snapshot.agents) {
+        if (baselineCredits[a.agentId] == null) baselineCredits[a.agentId] = a.credits;
+      }
+
+      return { ...state, agents, baselineCredits, jobs, bids, evidence: action.snapshot.evidence ?? [] };
     }
     case 'event': {
       const next: State = {
         ...state,
         agents: { ...state.agents },
+        baselineCredits: { ...state.baselineCredits },
         jobs: { ...state.jobs },
         bids: { ...state.bids },
         evidence: [...state.evidence],
@@ -151,6 +158,7 @@ function reduce(state: State, action: Action): State {
       // Apply event to snapshot model.
       if (action.event.type === 'agent_authed') {
         const prev = next.agents[action.event.agentId];
+        if (next.baselineCredits[action.event.agentId] == null) next.baselineCredits[action.event.agentId] = action.event.credits;
         next.agents[action.event.agentId] = {
           agentId: action.event.agentId,
           agentName: action.event.agentName,
@@ -160,6 +168,7 @@ function reduce(state: State, action: Action): State {
         };
       } else if (action.event.type === 'ledger_update') {
         const prev = next.agents[action.event.agentId];
+        if (next.baselineCredits[action.event.agentId] == null) next.baselineCredits[action.event.agentId] = action.event.credits;
         next.agents[action.event.agentId] = {
           agentId: action.event.agentId,
           agentName: prev?.agentName ?? shortId(action.event.agentId),
@@ -431,6 +440,13 @@ function negotiationSummary(job: Job): { status: string; round?: number; reason?
   return { status: 'none' };
 }
 
+function parseFirstInt(detail: string, key: string): number | null {
+  const m = detail.match(new RegExp(`${key}=(-?\\\\d+)\\\\b`));
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) ? n : null;
+}
+
 function parseDecision(detail: string): 'accept' | 'reject' | null {
   const m = detail.match(/decision=(accept|reject)\b/);
   if (!m) return null;
@@ -443,6 +459,7 @@ export default function App() {
     status: 'connecting',
     wsUrl,
     agents: {},
+    baselineCredits: {},
     jobs: {},
     bids: {},
     evidence: [],
@@ -508,6 +525,42 @@ export default function App() {
   const agentsSorted = useMemo(() => {
     return Object.values(state.agents).sort((a, b) => b.credits - a.credits);
   }, [state.agents]);
+
+  const highlights = useMemo(() => {
+    const biggestUpfront = (() => {
+      let best: { amount: number; jobId: string } | null = null;
+      for (const ev of state.evidence) {
+        if (ev.kind !== 'upfront') continue;
+        const amount = parseFirstInt(ev.detail, 'paid_upfront');
+        if (amount == null) continue;
+        if (!best || amount > best.amount) best = { amount, jobId: ev.jobId };
+      }
+      return best;
+    })();
+
+    const hottestNegotiation = (() => {
+      let best: { round: number; status: string; jobId: string } | null = null;
+      for (const job of Object.values(state.jobs)) {
+        const ns = negotiationSummary(job);
+        const round = typeof ns.round === 'number' ? ns.round : 0;
+        if (ns.status === 'none' || round <= 0) continue;
+        if (!best || round > best.round) best = { round, status: ns.status, jobId: job.id };
+      }
+      return best;
+    })();
+
+    const topEarners = (() => {
+      const rows = Object.values(state.agents).map((a) => {
+        const base = state.baselineCredits[a.agentId] ?? a.credits;
+        const delta = a.credits - base;
+        return { agentId: a.agentId, agentName: a.agentName, delta, credits: a.credits };
+      });
+      rows.sort((a, b) => b.delta - a.delta);
+      return rows.slice(0, 3);
+    })();
+
+    return { biggestUpfront, hottestNegotiation, topEarners };
+  }, [state.agents, state.baselineCredits, state.evidence, state.jobs]);
 
   const jobsSorted = useMemo(() => {
     return Object.values(state.jobs).sort((a, b) => b.createdAtMs - a.createdAtMs);
@@ -640,7 +693,7 @@ export default function App() {
 
       <main className="relative z-0 mx-auto max-w-7xl px-4 py-4">
         <div className="mb-4 grid gap-3 lg:grid-cols-12">
-          <Card className="lg:col-span-8">
+          <Card className="lg:col-span-6">
             <CardHeader>
               <CardTitle className="text-sm">What you are watching</CardTitle>
               <CardDescription className="text-xs">
@@ -649,13 +702,87 @@ export default function App() {
               </CardDescription>
             </CardHeader>
           </Card>
-          <Card className="lg:col-span-4">
+          <Card className="lg:col-span-3">
             <CardHeader>
               <CardTitle className="text-sm">Market state</CardTitle>
               <CardDescription className="text-xs font-mono">
                 open={openJobs} · awarded={awardedJobs} · done={completedJobs} · agents={agentsSorted.length}
               </CardDescription>
             </CardHeader>
+          </Card>
+          <Card className="lg:col-span-3">
+            <CardHeader>
+              <CardTitle className="text-sm">Highlights (This Session)</CardTitle>
+              <CardDescription className="text-xs">Fast signals worth clicking.</CardDescription>
+            </CardHeader>
+            <Separator />
+            <CardContent className="pt-4 space-y-2 text-xs font-mono">
+              <button
+                className={cn(
+                  'w-full text-left rounded-lg border bg-background/30 p-3 hover:bg-background/40',
+                  !highlights.biggestUpfront && 'opacity-70 cursor-default hover:bg-background/30',
+                )}
+                onClick={() => {
+                  if (!highlights.biggestUpfront) return;
+                  setSelectedJobId(highlights.biggestUpfront.jobId);
+                }}
+              >
+                <div className="flex items-baseline justify-between gap-3">
+                  <div className="text-foreground/90 font-semibold">Biggest deposit</div>
+                  <div className="text-accent font-semibold">
+                    {highlights.biggestUpfront ? highlights.biggestUpfront.amount : '-'}
+                  </div>
+                </div>
+                <div className="mt-1 text-[10px] text-muted-foreground">
+                  {highlights.biggestUpfront ? `job ${shortId(highlights.biggestUpfront.jobId)}` : 'No upfront payments yet.'}
+                </div>
+              </button>
+
+              <button
+                className={cn(
+                  'w-full text-left rounded-lg border bg-background/30 p-3 hover:bg-background/40',
+                  !highlights.hottestNegotiation && 'opacity-70 cursor-default hover:bg-background/30',
+                )}
+                onClick={() => {
+                  if (!highlights.hottestNegotiation) return;
+                  setSelectedJobId(highlights.hottestNegotiation.jobId);
+                }}
+              >
+                <div className="flex items-baseline justify-between gap-3">
+                  <div className="text-foreground/90 font-semibold">Hottest negotiation</div>
+                  <div className="flex items-center gap-2">
+                    {highlights.hottestNegotiation ? negotiationPill(highlights.hottestNegotiation.status) : null}
+                    <div className="text-[11px] font-mono text-muted-foreground">
+                      {highlights.hottestNegotiation ? `r${highlights.hottestNegotiation.round}` : '-'}
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-1 text-[10px] text-muted-foreground">
+                  {highlights.hottestNegotiation
+                    ? `job ${shortId(highlights.hottestNegotiation.jobId)}`
+                    : 'No negotiations yet.'}
+                </div>
+              </button>
+
+              <div className="rounded-lg border bg-background/30 p-3">
+                <div className="text-foreground/90 font-semibold">Top earners</div>
+                {highlights.topEarners.length === 0 ? (
+                  <div className="mt-1 text-[10px] text-muted-foreground">No agents yet.</div>
+                ) : (
+                  <div className="mt-2 space-y-1.5">
+                    {highlights.topEarners.map((r) => (
+                      <div key={r.agentId} className="flex items-baseline justify-between gap-2">
+                        <div className="truncate text-[11px] text-foreground/90">{r.agentName}</div>
+                        <div className={cn('text-[11px] font-semibold', r.delta >= 0 ? 'text-primary' : 'text-destructive')}>
+                          {r.delta >= 0 ? `+${r.delta}` : String(r.delta)}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="mt-2 text-[10px] text-muted-foreground">Delta since page load (approx).</div>
+              </div>
+            </CardContent>
           </Card>
         </div>
         <div className="grid gap-4 lg:grid-cols-12">
