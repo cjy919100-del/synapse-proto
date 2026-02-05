@@ -376,6 +376,27 @@ function statusPill(status: JobStatus) {
   }
 }
 
+function termsText(terms: Bid['terms'] | undefined) {
+  if (!terms) return '-';
+  const pct = Math.round(terms.upfrontPct * 100);
+  return `upfront ${pct}% · deadline ${terms.deadlineSeconds}s · revisions ${terms.maxRevisions}`;
+}
+
+function negotiationPill(status: string | undefined) {
+  const s = (status ?? 'none').toLowerCase();
+  if (s === 'pending') return <Badge variant="secondary">negotiating</Badge>;
+  if (s === 'accept' || s === 'accepted') return <Badge variant="accent">accepted</Badge>;
+  if (s === 'reject' || s === 'rejected') return <Badge variant="destructive">rejected</Badge>;
+  if (s === 'none') return <Badge variant="outline">no negotiation</Badge>;
+  return <Badge variant="outline">{s}</Badge>;
+}
+
+function parseDecision(detail: string): 'accept' | 'reject' | null {
+  const m = detail.match(/decision=(accept|reject)\b/);
+  if (!m) return null;
+  return m[1] === 'accept' ? 'accept' : 'reject';
+}
+
 export default function App() {
   const wsUrl = (import.meta.env.VITE_OBSERVER_WS as string | undefined) ?? defaultWsUrl();
   const [state, dispatch] = useReducer(reduce, {
@@ -476,6 +497,32 @@ export default function App() {
       .sort((a, b) => b.atMs - a.atMs)
       .slice(0, 80);
   }, [selectedJobId, state.evidence]);
+
+  const selectedNegotiation = useMemo(() => {
+    const payload = selectedJob?.payload;
+    if (!payload) return null;
+    const raw = (payload as any).negotiation;
+    if (!raw || typeof raw !== 'object') return null;
+    const terms = (raw as any).terms;
+    return {
+      workerId: String((raw as any).workerId ?? ''),
+      bidId: typeof (raw as any).bidId === 'string' ? String((raw as any).bidId) : undefined,
+      bidPrice: typeof (raw as any).bidPrice === 'number' ? Number((raw as any).bidPrice) : undefined,
+      terms: terms && typeof terms === 'object' ? (terms as Bid['terms']) : undefined,
+      notes: (raw as any).notes == null ? undefined : String((raw as any).notes),
+      status: typeof (raw as any).status === 'string' ? String((raw as any).status) : 'pending',
+      atMs: typeof (raw as any).atMs === 'number' ? Number((raw as any).atMs) : undefined,
+      decidedAtMs: typeof (raw as any).decidedAtMs === 'number' ? Number((raw as any).decidedAtMs) : undefined,
+    };
+  }, [selectedJob?.payload]);
+
+  const acceptedTerms = useMemo(() => {
+    const payload = selectedJob?.payload;
+    if (!payload) return undefined;
+    const raw = (payload as any).acceptedTerms;
+    if (!raw || typeof raw !== 'object') return undefined;
+    return raw as Bid['terms'];
+  }, [selectedJob?.payload]);
 
   useEffect(() => {
     if (!deepLinkJobId) return;
@@ -743,35 +790,142 @@ export default function App() {
                   </div>
                 </div>
 
-                <div>
-                  <div className="text-xs font-semibold">Applicants</div>
-                  <div className="mt-2 rounded-lg border bg-background/30 p-3">
-                    {selectedBids.length === 0 ? (
-                      <div className="text-xs font-mono text-muted-foreground">No bids yet.</div>
-                    ) : (
-                      <div className="space-y-2">
-                        {selectedBids.slice(0, 8).map((b) => (
-                          <div key={b.id} className="rounded-md border bg-background/40 p-2">
-                            <div className="flex items-baseline justify-between gap-2 text-xs font-mono">
-                              <div className="text-foreground/90">worker {shortId(b.bidderId)}</div>
-                              <div className="text-muted-foreground">
-                                rep {Math.round(((b.bidderRep?.score ?? 0.5) as number) * 100)}% · price {b.price} · eta{' '}
-                                {b.etaSeconds}s
+                <div className="grid lg:grid-cols-2 gap-3">
+                  <div>
+                    <div className="text-xs font-semibold">Applicants</div>
+                    <div className="mt-2 rounded-lg border bg-background/30 p-3">
+                      {selectedBids.length === 0 ? (
+                        <div className="text-xs font-mono text-muted-foreground">No bids yet.</div>
+                      ) : (
+                        <div className="space-y-2">
+                          {selectedBids.slice(0, 8).map((b) => (
+                            <div key={b.id} className="rounded-md border bg-background/40 p-2">
+                              <div className="flex items-baseline justify-between gap-2 text-xs font-mono">
+                                <div className="text-foreground/90">worker {shortId(b.bidderId)}</div>
+                                <div className="text-muted-foreground">
+                                  rep {Math.round(((b.bidderRep?.score ?? 0.5) as number) * 100)}% · price {b.price} · eta{' '}
+                                  {b.etaSeconds}s
+                                </div>
                               </div>
+                              {b.terms ? (
+                                <div className="mt-1 text-[11px] text-muted-foreground">terms {termsText(b.terms)}</div>
+                              ) : null}
+                              {b.pitch ? <div className="mt-1 text-[11px] text-muted-foreground">{b.pitch}</div> : null}
                             </div>
-                            {b.terms ? (
-                              <div className="mt-1 text-[11px] text-muted-foreground">
-                                terms upfront {Math.round(b.terms.upfrontPct * 100)}% · deadline {b.terms.deadlineSeconds}s · revisions{' '}
-                                {b.terms.maxRevisions}
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="flex items-baseline justify-between gap-3">
+                      <div className="text-xs font-semibold">Negotiation / Contract</div>
+                      {negotiationPill(selectedNegotiation?.status)}
+                    </div>
+                    <div className="mt-2 rounded-lg border bg-background/30 p-3">
+                      {(() => {
+                        const n = selectedNegotiation;
+                        const offerEv = selectedEvidence.find((e) => e.kind === 'offer');
+                        const respEv = selectedEvidence.find((e) => e.kind === 'offer_response');
+                        const upfrontEv = selectedEvidence.find((e) => e.kind === 'upfront');
+
+                        const bid =
+                          (n?.bidId ? selectedBids.find((b) => b.id === n.bidId) : null) ??
+                          (n?.workerId ? selectedBids.find((b) => b.bidderId === n.workerId) : null) ??
+                          (selectedJob?.workerId ? selectedBids.find((b) => b.bidderId === selectedJob.workerId) : null) ??
+                          (selectedBids[0] ?? null);
+
+                        const decision = respEv ? parseDecision(respEv.detail) : null;
+
+                        const steps: Array<{ k: string; title: string; atMs?: number; body: React.ReactNode }> = [
+                          {
+                            k: 'bid',
+                            title: '1) Worker proposal',
+                            atMs: bid?.createdAtMs,
+                            body: bid ? (
+                              <div className="space-y-1">
+                                <div className="text-foreground/90">
+                                  worker {shortId(bid.bidderId)} · price {bid.price} · eta {bid.etaSeconds}s
+                                </div>
+                                <div className="text-muted-foreground">terms {termsText(bid.terms)}</div>
+                                {bid.pitch ? <div className="text-muted-foreground">{bid.pitch}</div> : null}
                               </div>
-                            ) : null}
-                            {b.pitch ? (
-                              <div className="mt-1 text-[11px] text-muted-foreground">{b.pitch}</div>
-                            ) : null}
+                            ) : (
+                              <div className="text-muted-foreground">No bid yet.</div>
+                            ),
+                          },
+                          {
+                            k: 'offer',
+                            title: '2) Boss counter-offer',
+                            atMs: offerEv?.atMs ?? n?.atMs,
+                            body: n?.terms ? (
+                              <div className="space-y-1">
+                                <div className="text-foreground/90">to worker {shortId(n.workerId)}</div>
+                                <div className="text-muted-foreground">terms {termsText(n.terms)}</div>
+                                {n.notes ? <div className="text-muted-foreground">{n.notes}</div> : null}
+                              </div>
+                            ) : offerEv ? (
+                              <div className="text-muted-foreground">{offerEv.detail}</div>
+                            ) : (
+                              <div className="text-muted-foreground">No offer yet.</div>
+                            ),
+                          },
+                          {
+                            k: 'decision',
+                            title: '3) Worker decision',
+                            atMs: respEv?.atMs ?? n?.decidedAtMs,
+                            body: respEv ? (
+                              <div className="space-y-1">
+                                <div className="text-foreground/90">
+                                  {decision ? negotiationPill(decision) : null} <span className="ml-2">{respEv.detail}</span>
+                                </div>
+                              </div>
+                            ) : n?.status && n.status !== 'pending' ? (
+                              <div className="text-foreground/90">{negotiationPill(n.status)}</div>
+                            ) : (
+                              <div className="text-muted-foreground">Waiting…</div>
+                            ),
+                          },
+                        ];
+
+                        if (acceptedTerms) {
+                          steps.push({
+                            k: 'contract',
+                            title: '4) Contract terms (accepted)',
+                            atMs: undefined,
+                            body: (
+                              <div className="space-y-1">
+                                <div className="text-muted-foreground">terms {termsText(acceptedTerms)}</div>
+                              </div>
+                            ),
+                          });
+                        }
+
+                        if (upfrontEv) {
+                          steps.push({
+                            k: 'upfront',
+                            title: 'Upfront (deposit)',
+                            atMs: upfrontEv.atMs,
+                            body: <div className="text-muted-foreground">{upfrontEv.detail}</div>,
+                          });
+                        }
+
+                        return (
+                          <div className="space-y-2 text-[11px] font-mono">
+                            {steps.map((s) => (
+                              <div key={s.k} className="rounded-md border bg-background/40 p-2">
+                                <div className="flex items-baseline justify-between gap-2">
+                                  <div className="text-foreground/90 font-semibold">{s.title}</div>
+                                  {s.atMs ? <div className="text-muted-foreground">{formatTime(s.atMs)}</div> : null}
+                                </div>
+                                <div className="mt-1">{s.body}</div>
+                              </div>
+                            ))}
                           </div>
-                        ))}
-                      </div>
-                    )}
+                        );
+                      })()}
+                    </div>
                   </div>
                 </div>
 
