@@ -15,6 +15,7 @@ import {
   type Job,
   type JobAwardedMsg,
   type JobPostedMsg,
+  type JobUpdatedMsg,
   ServerToAgentMsgSchema,
 } from '../protocol.js';
 import { AgentLlm } from '../llm.js';
@@ -107,6 +108,8 @@ export class GithubBotAgent {
         return;
       case 'job_posted':
         return this.onJobPosted(msg);
+      case 'job_updated':
+        return this.onJobUpdated(msg);
       case 'job_awarded':
         return this.onJobAwarded(msg);
       case 'error':
@@ -136,21 +139,29 @@ export class GithubBotAgent {
   }
 
   private onJobPosted(msg: JobPostedMsg) {
-    if (!this.agentId) return;
-    if (msg.job.status !== 'open') return;
-    if (msg.job.kind !== 'github_pr_bounty') return;
+    this.onJobUpsert(msg.job);
+  }
 
-    const ref = parseGithubRef(msg.job);
+  private onJobUpdated(msg: JobUpdatedMsg) {
+    this.onJobUpsert(msg.job);
+  }
+
+  private onJobUpsert(job: JobPostedMsg['job']) {
+    if (!this.agentId) return;
+    if (job.status !== 'open') return;
+    if (job.kind !== 'github_pr_bounty') return;
+
+    const ref = parseGithubRef(job);
     if (!ref) return;
     if (this.cfg.onlyRepo && repoSlug(ref) !== this.cfg.onlyRepo) return;
 
-    this.jobs.set(msg.job.id, msg.job);
+    this.jobs.set(job.id, job);
 
     const bid: AgentToServerMsg = {
       v: PROTOCOL_VERSION,
       type: 'bid',
-      jobId: msg.job.id,
-      price: Math.min(msg.job.budget, 10),
+      jobId: job.id,
+      price: Math.min(job.budget, 10),
       etaSeconds: 120,
     };
     this.send(bid);
@@ -258,4 +269,3 @@ export class GithubBotAgent {
     console.log(line);
   }
 }
-

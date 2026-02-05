@@ -9,6 +9,7 @@ import {
   type Job,
   type JobAwardedMsg,
   type JobPostedMsg,
+  type JobUpdatedMsg,
   type JobReviewedMsg,
   type JobSubmittedMsg,
   type OfferMadeMsg,
@@ -27,6 +28,8 @@ type EconomyAgentConfig = {
   canWork?: boolean;
   /** Max open jobs this agent keeps posted at once. */
   maxOpenJobs?: number;
+  /** Allow synthetic auto-post loop (simulation only). */
+  autoPostJobs?: boolean;
 };
 
 type BidLite = { bidderId: string; price: number; etaSeconds: number; score: number };
@@ -62,6 +65,7 @@ export class EconomyAgent {
   private readonly openJobs = new Map<string, Job>(); // jobId -> job
   private readonly ownedOpenJobs = new Set<string>();
   private readonly bidsByJobId = new Map<string, BidLite[]>();
+  private readonly bidSentByJobId = new Set<string>();
   private readonly awardTimers = new Map<string, NodeJS.Timeout>();
   private readonly assignedJobs = new Set<string>();
   private readonly rejectedWorkersByJobId = new Map<string, Set<string>>();
@@ -111,6 +115,8 @@ export class EconomyAgent {
         return;
       case 'job_posted':
         return this.onJobPosted(msg);
+      case 'job_updated':
+        return this.onJobUpdated(msg);
       case 'bid_posted':
         return this.onBidPosted(msg);
       case 'job_awarded':
@@ -154,6 +160,7 @@ export class EconomyAgent {
     if (!this.agentId) return;
     const canBoss = this.cfg.canBoss !== false;
     if (!canBoss) return;
+    if (this.cfg.autoPostJobs !== true) return;
 
     const maxOpen = this.cfg.maxOpenJobs ?? 1;
     this.postTimer = setInterval(() => {
@@ -181,19 +188,31 @@ export class EconomyAgent {
   }
 
   private onJobPosted(msg: JobPostedMsg) {
+    this.onJobUpsert(msg.job);
+  }
+
+  private onJobUpdated(msg: JobUpdatedMsg) {
+    this.onJobUpsert(msg.job);
+  }
+
+  private onJobUpsert(job: Job) {
     if (!this.agentId) return;
-    const job = msg.job;
     this.openJobs.set(job.id, job);
 
     if (job.status === 'open' && job.requesterId === this.agentId) {
       this.ownedOpenJobs.add(job.id);
       return;
     }
+    if (job.requesterId === this.agentId) this.ownedOpenJobs.delete(job.id);
 
     const canWork = this.cfg.canWork !== false;
     if (!canWork) return;
-    if (job.status !== 'open') return;
+    if (job.status !== 'open') {
+      this.bidSentByJobId.delete(job.id);
+      return;
+    }
     if (job.requesterId === this.agentId) return;
+    if (this.bidSentByJobId.has(job.id)) return;
     if (spendable(this.credits, this.locked) < 50) return;
 
     // Bid on a subset to avoid everyone bidding on everything.
@@ -214,6 +233,7 @@ export class EconomyAgent {
     const terms = this.makeTermsFor(job, price, etaSeconds);
     const bid: AgentToServerMsg = { v: PROTOCOL_VERSION, type: 'bid', jobId: job.id, price, etaSeconds, pitch, terms };
     this.send(bid);
+    this.bidSentByJobId.add(job.id);
   }
 
   private onBidPosted(msg: BidPostedMsg) {
@@ -288,14 +308,22 @@ export class EconomyAgent {
           : this.persona.boss === 'speed_runner'
             ? { ...baseTerms, deadlineSeconds: Math.max(4, winner.etaSeconds * 2), maxRevisions: 0 }
             : { ...baseTerms, upfrontPct: 0.1, maxRevisions: 1 };
+    const price = (() => {
+      if (this.persona.boss === 'cost_cutter') return Math.max(10, Math.floor(winner.price * 0.85));
+      if (this.persona.boss === 'risk_averse') return Math.max(10, Math.floor(winner.price * 0.95));
+      if (this.persona.boss === 'speed_runner') return Math.max(10, Math.floor(winner.price * 1.03));
+      return winner.price;
+    })();
+    const offerPrice = Math.min(job.budget, Math.max(10, price));
 
     const offer: AgentToServerMsg = {
       v: PROTOCOL_VERSION,
       type: 'counter_offer',
       jobId,
       workerId: winner.bidderId,
+      price: offerPrice,
       terms,
-      notes: `boss=${this.persona.boss} counter_terms upfront=${Math.round(terms.upfrontPct * 100)}% deadline=${terms.deadlineSeconds}s rev=${terms.maxRevisions}`,
+      notes: `boss=${this.persona.boss} counter_terms price=${offerPrice} upfront=${Math.round(terms.upfrontPct * 100)}% deadline=${terms.deadlineSeconds}s rev=${terms.maxRevisions}`,
     };
     this.send(offer);
   }
@@ -328,11 +356,21 @@ export class EconomyAgent {
 
     // Worker decides based on personality: premium likes upfront; undercutter dislikes revisions; sprinter dislikes long deadline.
     const t = msg.terms;
+    const job = this.openJobs.get(msg.jobId);
+    const budget = job?.budget ?? msg.price;
+    const minAcceptPrice = (() => {
+      if (this.persona.worker === 'premium') return Math.ceil(budget * 0.7);
+      if (this.persona.worker === 'sprinter') return Math.ceil(budget * 0.55);
+      if (this.persona.worker === 'selective') return Math.ceil(budget * 0.5);
+      if (this.persona.worker === 'balanced') return Math.ceil(budget * 0.45);
+      return Math.ceil(budget * 0.3);
+    })();
     let accept = true;
     if (this.persona.worker === 'undercutter' && t.upfrontPct > 0) accept = false;
     if (this.persona.worker === 'sprinter' && t.deadlineSeconds > 12) accept = false;
     if (this.persona.worker === 'premium' && t.upfrontPct < 0.1) accept = Math.random() < 0.65;
     if (this.persona.worker === 'selective' && t.maxRevisions > 1) accept = false;
+    if (msg.price < minAcceptPrice) accept = false;
 
     // Sometimes counter instead of hard reject to make negotiation feel real.
     const wantsCounter = !accept ? Math.random() < 0.8 : Math.random() < 0.15;
@@ -341,14 +379,21 @@ export class EconomyAgent {
       if (this.persona.worker === 'premium') counter.upfrontPct = Math.min(0.35, Math.max(counter.upfrontPct, 0.2));
       if (this.persona.worker === 'sprinter') counter.deadlineSeconds = Math.max(4, Math.min(counter.deadlineSeconds, 10));
       if (this.persona.worker === 'balanced') counter.maxRevisions = Math.max(0, Math.min(counter.maxRevisions, 1));
+      const counterPrice = (() => {
+        if (this.persona.worker === 'premium') return Math.ceil(Math.max(msg.price + 12, budget * 0.8));
+        if (this.persona.worker === 'sprinter') return Math.ceil(Math.max(msg.price + 6, budget * 0.6));
+        return Math.ceil(Math.max(msg.price + 4, budget * 0.55));
+      })();
+      const price = Math.min(budget, Math.max(10, counterPrice));
 
       const msgOut: AgentToServerMsg = {
         v: PROTOCOL_VERSION,
         type: 'worker_counter',
         jobId: msg.jobId,
         requesterId: msg.requesterId,
+        price,
         terms: counter,
-        notes: `worker=${this.persona.worker} counter`,
+        notes: `worker=${this.persona.worker} counter price=${price}`,
       };
       setTimeout(() => this.send(msgOut), randInt(300, 900));
       return;
@@ -382,8 +427,17 @@ export class EconomyAgent {
     if (msg.requesterId !== this.agentId) return;
     if (msg.fromRole !== 'worker') return;
 
+    const job = this.openJobs.get(msg.jobId);
+    const budget = job?.budget ?? msg.price;
     const base = msg.terms;
+    const maxAcceptPrice = (() => {
+      if (this.persona.boss === 'cost_cutter') return Math.floor(budget * 0.65);
+      if (this.persona.boss === 'risk_averse') return Math.floor(budget * 0.8);
+      if (this.persona.boss === 'speed_runner') return Math.floor(budget * 0.9);
+      return Math.floor(budget * 0.8);
+    })();
     const acceptable = (() => {
+      if (msg.price > maxAcceptPrice) return false;
       if (this.persona.boss === 'risk_averse') return base.maxRevisions <= 0 && base.upfrontPct <= 0.1;
       if (this.persona.boss === 'cost_cutter') return base.upfrontPct <= 0.1;
       if (this.persona.boss === 'speed_runner') return base.deadlineSeconds <= 10 && base.maxRevisions <= 0;
@@ -400,14 +454,23 @@ export class EconomyAgent {
       if (this.persona.boss === 'balanced') t.maxRevisions = Math.max(0, Math.min(1, t.maxRevisions));
       return t;
     })();
+    const price = (() => {
+      if (acceptable) return msg.price;
+      const cap = Math.max(10, maxAcceptPrice);
+      const blended = Math.floor((msg.price + cap) / 2);
+      return Math.min(budget, Math.max(10, blended));
+    })();
 
     const offer: AgentToServerMsg = {
       v: PROTOCOL_VERSION,
       type: 'counter_offer',
       jobId: msg.jobId,
       workerId: msg.workerId,
+      price,
       terms,
-      notes: acceptable ? `boss=${this.persona.boss} accept_counter` : `boss=${this.persona.boss} counter_back`,
+      notes: acceptable
+        ? `boss=${this.persona.boss} accept_counter price=${price}`
+        : `boss=${this.persona.boss} counter_back price=${price}`,
     };
     setTimeout(() => this.send(offer), randInt(350, 1_100));
   }

@@ -98,6 +98,13 @@ export const JobPostedMsgSchema = z.object({
 });
 export type JobPostedMsg = z.infer<typeof JobPostedMsgSchema>;
 
+export const JobUpdatedMsgSchema = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  type: z.literal('job_updated'),
+  job: JobSchema,
+});
+export type JobUpdatedMsg = z.infer<typeof JobUpdatedMsgSchema>;
+
 export const BidMsgSchema = z.object({
   v: z.literal(PROTOCOL_VERSION),
   type: z.literal('bid'),
@@ -130,6 +137,7 @@ export const CounterOfferMsgSchema = z.object({
   type: z.literal('counter_offer'),
   jobId: z.string(),
   workerId: z.string(),
+  price: z.number().positive(),
   terms: TermsSchema,
   notes: z.string().optional(),
 });
@@ -140,6 +148,7 @@ export const WorkerCounterMsgSchema = z.object({
   type: z.literal('worker_counter'),
   jobId: z.string(),
   requesterId: z.string(),
+  price: z.number().positive(),
   terms: TermsSchema,
   notes: z.string().optional(),
 });
@@ -161,6 +170,7 @@ export const OfferMadeMsgSchema = z.object({
   jobId: z.string(),
   requesterId: z.string(),
   workerId: z.string(),
+  price: z.number().positive(),
   terms: TermsSchema,
   notes: z.string().optional(),
 });
@@ -174,6 +184,7 @@ export const CounterMadeMsgSchema = z.object({
   workerId: z.string(),
   fromRole: z.enum(['boss', 'worker']),
   fromId: z.string(),
+  price: z.number().positive(),
   terms: TermsSchema,
   notes: z.string().optional(),
   round: z.number().int().min(1),
@@ -279,6 +290,7 @@ export const ServerToAgentMsgSchema = z.discriminatedUnion('type', [
   AuthedMsgSchema,
   ErrorMsgSchema,
   JobPostedMsgSchema,
+  JobUpdatedMsgSchema,
   BidPostedMsgSchema,
   JobAwardedMsgSchema,
   OfferMadeMsgSchema,

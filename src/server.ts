@@ -19,6 +19,7 @@ import {
   type JobAwardedMsg,
   type JobCompletedMsg,
   type JobPostedMsg,
+  type JobUpdatedMsg,
   type LedgerUpdateMsg,
   type ServerToAgentMsg,
   safeParseAgentMessage,
@@ -65,13 +66,21 @@ type NegotiationState = {
   workerId: string;
   bidId: string;
   bidPrice: number;
+  price: number;
   status: 'pending' | 'accept' | 'reject' | 'max_rounds';
   round: number;
   terms: Terms;
   notes?: string | null;
   atMs: number;
   decidedAtMs?: number;
-  history: Array<{ round: number; fromRole: 'boss' | 'worker'; terms: Terms; notes?: string | null; atMs: number }>;
+  history: Array<{
+    round: number;
+    fromRole: 'boss' | 'worker';
+    price: number;
+    terms: Terms;
+    notes?: string | null;
+    atMs: number;
+  }>;
 };
 
 const DEFAULT_STARTING_CREDITS = 1_000;
@@ -521,23 +530,7 @@ export class CoreServer extends EventEmitter {
     job.lockedStake = 0;
     job.awardedAtMs = undefined;
 
-    // Push an update by broadcasting job_posted with same job id (simple for spectator).
-    const out: JobPostedMsg = {
-      v: PROTOCOL_VERSION,
-      type: 'job_posted',
-      job: {
-        id: job.id,
-        title: job.title,
-        description: job.description,
-        budget: job.budget,
-        requesterId: job.requesterId,
-        createdAtMs: job.createdAtMs,
-        status: job.status,
-        kind: job.kind,
-        payload: job.payload,
-      },
-    };
-    this.broadcast(out);
+    this.broadcastJobUpdate(job);
     this.sendLedgerUpdate(job.requesterId);
 
     if (this.db) {
@@ -832,6 +825,7 @@ export class CoreServer extends EventEmitter {
     requesterId: string;
     job: JobState;
     workerId: string;
+    agreedPrice?: number;
     notes?: string;
     errWs: WebSocket | null;
   }) {
@@ -842,9 +836,13 @@ export class CoreServer extends EventEmitter {
     const hasBid = job.bids.some((b) => b.bidderId === workerId);
     if (!hasBid) return args.errWs ? this.fail(args.errWs, 'worker_has_no_bid') : undefined;
 
+    const settledBudget = Math.max(1, Math.floor(args.agreedPrice ?? job.budget));
+    if (settledBudget > job.budget) return args.errWs ? this.fail(args.errWs, 'agreed_price_over_budget') : undefined;
+
     const acct = this.ledger.get(requesterId);
     if (!acct) return args.errWs ? this.fail(args.errWs, 'no_ledger_account') : undefined;
-    if (acct.credits - acct.locked < job.budget) return args.errWs ? this.fail(args.errWs, 'insufficient_credits') : undefined;
+    if (acct.credits - acct.locked < settledBudget)
+      return args.errWs ? this.fail(args.errWs, 'insufficient_credits') : undefined;
 
     const workerAcct = this.ledger.get(workerId);
     if (!workerAcct) return args.errWs ? this.fail(args.errWs, 'worker_no_ledger_account') : undefined;
@@ -852,8 +850,8 @@ export class CoreServer extends EventEmitter {
     if (stake > 0 && workerAcct.credits - workerAcct.locked < stake)
       return args.errWs ? this.fail(args.errWs, 'worker_insufficient_stake') : undefined;
 
-    acct.locked += job.budget;
-    job.lockedBudget = job.budget;
+    acct.locked += settledBudget;
+    job.lockedBudget = settledBudget;
     job.status = 'awarded';
     job.workerId = workerId;
     job.awardedAtMs = Date.now();
@@ -865,15 +863,15 @@ export class CoreServer extends EventEmitter {
       type: 'job_awarded',
       jobId: job.id,
       workerId,
-      budgetLocked: job.budget,
+      budgetLocked: settledBudget,
     };
     this.broadcast(out);
     if (stake > 0) this.sendLedgerUpdate(workerId);
     await this.addEvidence({
       jobId: job.id,
       kind: 'award',
-      detail: `worker=${workerId.slice(0, 12)} budget_locked=${job.budget} stake_locked=${stake}${args.notes ? ` notes=${args.notes}` : ''}`,
-      payload: { workerId, budgetLocked: job.budget, stakeLocked: stake, notes: args.notes ?? null },
+      detail: `worker=${workerId.slice(0, 12)} budget_locked=${settledBudget} stake_locked=${stake}${args.notes ? ` notes=${args.notes}` : ''}`,
+      payload: { workerId, budgetLocked: settledBudget, stakeLocked: stake, notes: args.notes ?? null },
     });
 
     const acceptedTerms = (job.payload as any)?.acceptedTerms as Terms | undefined;
@@ -1020,6 +1018,7 @@ export class CoreServer extends EventEmitter {
     const workerId = msg.workerId;
     const bid = job.bids.find((b) => b.bidderId === workerId);
     if (!bid) return this.fail(session.ws, 'worker_has_no_bid');
+    if (msg.price > job.budget) return this.fail(session.ws, 'offer_over_budget');
 
     const maxRounds = Math.max(1, parseIntEnv('SYNAPSE_NEGOTIATION_MAX_ROUNDS', DEFAULT_NEGOTIATION_MAX_ROUNDS));
     const prev = ((job.payload as any)?.negotiation as NegotiationState | undefined) ?? undefined;
@@ -1044,6 +1043,7 @@ export class CoreServer extends EventEmitter {
       jobId: job.id,
       requesterId,
       workerId,
+      price: msg.price,
       terms: msg.terms,
       notes: msg.notes,
     };
@@ -1057,6 +1057,7 @@ export class CoreServer extends EventEmitter {
       workerId,
       fromRole: 'boss',
       fromId: requesterId,
+      price: msg.price,
       terms: msg.terms,
       notes: msg.notes,
       round: nextRound,
@@ -1065,7 +1066,7 @@ export class CoreServer extends EventEmitter {
     await this.addEvidence({
       jobId: job.id,
       kind: 'offer',
-      detail: `boss -> worker=${workerId.slice(0, 12)} upfront=${msg.terms.upfrontPct} deadline=${msg.terms.deadlineSeconds}s rev=${msg.terms.maxRevisions}${
+      detail: `boss -> worker=${workerId.slice(0, 12)} price=${msg.price} upfront=${msg.terms.upfrontPct} deadline=${msg.terms.deadlineSeconds}s rev=${msg.terms.maxRevisions}${
         msg.notes ? ` notes=${msg.notes}` : ''
       }`,
       payload: offer,
@@ -1078,6 +1079,7 @@ export class CoreServer extends EventEmitter {
             workerId,
             bidId: bid.id,
             bidPrice: bid.price,
+            price: msg.price,
             status: 'pending',
             round: 0,
             terms: msg.terms,
@@ -1088,13 +1090,21 @@ export class CoreServer extends EventEmitter {
 
     const history = [
       ...(base.history ?? []),
-      { round: nextRound, fromRole: 'boss' as const, terms: msg.terms, notes: msg.notes ?? null, atMs: Date.now() },
+      {
+        round: nextRound,
+        fromRole: 'boss' as const,
+        price: msg.price,
+        terms: msg.terms,
+        notes: msg.notes ?? null,
+        atMs: Date.now(),
+      },
     ];
 
     job.payload = {
       ...(job.payload ?? {}),
       negotiation: {
         ...base,
+        price: msg.price,
         status: 'pending',
         round: nextRound,
         terms: msg.terms,
@@ -1112,6 +1122,7 @@ export class CoreServer extends EventEmitter {
     if (!job) return this.fail(session.ws, 'job_not_found');
     if (job.status !== 'open') return this.fail(session.ws, 'job_not_open');
     if (msg.requesterId !== job.requesterId) return this.fail(session.ws, 'bad_requester');
+    if (msg.price > job.budget) return this.fail(session.ws, 'counter_over_budget');
 
     const prev = ((job.payload as any)?.negotiation as NegotiationState | undefined) ?? undefined;
     if (!prev) return this.fail(session.ws, 'no_active_offer');
@@ -1137,6 +1148,7 @@ export class CoreServer extends EventEmitter {
       workerId,
       fromRole: 'worker',
       fromId: workerId,
+      price: msg.price,
       terms: msg.terms,
       notes: msg.notes,
       round: nextRound,
@@ -1145,17 +1157,25 @@ export class CoreServer extends EventEmitter {
     await this.addEvidence({
       jobId: job.id,
       kind: 'counter',
-      detail: `worker -> boss upfront=${msg.terms.upfrontPct} deadline=${msg.terms.deadlineSeconds}s rev=${msg.terms.maxRevisions}${msg.notes ? ` notes=${msg.notes}` : ''}`,
+      detail: `worker -> boss price=${msg.price} upfront=${msg.terms.upfrontPct} deadline=${msg.terms.deadlineSeconds}s rev=${msg.terms.maxRevisions}${msg.notes ? ` notes=${msg.notes}` : ''}`,
       payload: counterMade,
     });
 
     const history = [
       ...(prev.history ?? []),
-      { round: nextRound, fromRole: 'worker' as const, terms: msg.terms, notes: msg.notes ?? null, atMs: Date.now() },
+      {
+        round: nextRound,
+        fromRole: 'worker' as const,
+        price: msg.price,
+        terms: msg.terms,
+        notes: msg.notes ?? null,
+        atMs: Date.now(),
+      },
     ];
 
     (job.payload as any).negotiation = {
       ...prev,
+      price: msg.price,
       status: 'pending',
       round: nextRound,
       terms: msg.terms,
@@ -1207,17 +1227,19 @@ export class CoreServer extends EventEmitter {
 
     // Accept: award the job to this worker and embed the accepted terms.
     (job.payload as any).acceptedTerms = negotiation.terms;
+    (job.payload as any).acceptedPrice = negotiation.price;
     await this.addEvidence({
       jobId: job.id,
       kind: 'negotiation',
-      detail: `accepted upfront=${negotiation.terms.upfrontPct} deadline=${negotiation.terms.deadlineSeconds}s rev=${negotiation.terms.maxRevisions}`,
+      detail: `accepted price=${negotiation.price} upfront=${negotiation.terms.upfrontPct} deadline=${negotiation.terms.deadlineSeconds}s rev=${negotiation.terms.maxRevisions}`,
     });
 
     await this.awardJob({
       requesterId: job.requesterId,
       job,
       workerId,
-      notes: `offer_accept upfront=${negotiation.terms.upfrontPct} deadline=${negotiation.terms.deadlineSeconds}s rev=${negotiation.terms.maxRevisions}`,
+      agreedPrice: negotiation.price,
+      notes: `offer_accept price=${negotiation.price} upfront=${negotiation.terms.upfrontPct} deadline=${negotiation.terms.deadlineSeconds}s rev=${negotiation.terms.maxRevisions}`,
       // If something goes wrong (e.g., budget drained), the worker sees it.
       errWs: session.ws,
     });
@@ -1268,10 +1290,9 @@ export class CoreServer extends EventEmitter {
   }
 
   private broadcastJobUpdate(job: JobState) {
-    // Use job_posted as a generic "job upsert" message; the spectator UI already treats it as an upsert.
-    const out: JobPostedMsg = {
+    const out: JobUpdatedMsg = {
       v: PROTOCOL_VERSION,
-      type: 'job_posted',
+      type: 'job_updated',
       job: {
         id: job.id,
         title: job.title,
@@ -1298,6 +1319,7 @@ export class CoreServer extends EventEmitter {
     this.emit('tape', evt);
     // Server-side tape.
     if (msg.type === 'job_posted') this.log(`[tape] job_posted: ${msg.job.title} (${msg.job.budget})`);
+    if (msg.type === 'job_updated') this.log(`[tape] job_updated: ${msg.job.title} [${msg.job.status}]`);
     if (msg.type === 'bid_posted') this.log(`[tape] bid: job=${msg.bid.jobId.slice(0, 8)} price=${msg.bid.price}`);
     if (msg.type === 'job_awarded')
       this.log(`[tape] awarded: job=${msg.jobId.slice(0, 8)} worker=${msg.workerId.slice(0, 8)}`);
